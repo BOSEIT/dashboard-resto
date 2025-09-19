@@ -5,6 +5,7 @@ from firebase_admin import credentials, db
 from io import BytesIO
 from datetime import datetime
 import altair as alt
+import json
 
 # --- KONFIGURASI ---
 DATABASE_URL = 'https://management-asset-1ca79-default-rtdb.asia-southeast1.firebasedatabase.app/'
@@ -212,4 +213,5 @@ if selected_branch:
 
                     # Tampilkan DataFrame yang sudah diformat (tanpa column_config)
                     st.dataframe(df_display, use_container_width=True)
+
 
