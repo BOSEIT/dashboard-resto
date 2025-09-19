@@ -15,7 +15,7 @@ CREDENTIALS_FILE = 'firebase-credentials.json'
 def initialize_firebase():
     try:
         if not firebase_admin._apps:
-            # Ambil kredensial dari Streamlit Secrets
+            # Ambil kredensial dari Streamlit Secrets, bukan dari file
             creds_json_str = st.secrets["firebase_credentials"]
             creds_dict = json.loads(creds_json_str)
 
@@ -212,3 +212,4 @@ if selected_branch:
 
                     # Tampilkan DataFrame yang sudah diformat (tanpa column_config)
                     st.dataframe(df_display, use_container_width=True)
+
