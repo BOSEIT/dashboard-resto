@@ -9,7 +9,7 @@ import xlsxwriter
 import re
 import time
 import os
-import json # Tambahkan import json
+import json 
 
 # ==============================================================================
 # 1. KONFIGURASI & LOGIN
@@ -67,9 +67,7 @@ def initialize_firebase():
     try:
         if not firebase_admin._apps:
             # 1. Prioritas: Cek Streamlit Secrets (Untuk Cloud Hosting)
-            # Ini mencegah kita mengupload file .json rahasia ke GitHub
             if 'firebase_credentials' in st.secrets:
-                # Mengambil dict dari secrets.toml
                 cred_info = dict(st.secrets['firebase_credentials'])
                 cred = credentials.Certificate(cred_info)
                 firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DB_URL})
@@ -77,7 +75,6 @@ def initialize_firebase():
             # 2. Fallback: Cek File Lokal (Untuk Localhost)
             else:
                 cred_file = None
-                # Cek berbagai kemungkinan nama file (termasuk yang double extension)
                 if os.path.exists('firebase-credentials.json'):
                     cred_file = 'firebase-credentials.json'
                 elif os.path.exists('firebase-credentials.json.json'):
@@ -124,14 +121,13 @@ def fetch_data(branch_name, debug_mode=False):
                         elif isinstance(trx_data, dict):
                             all_transactions.extend(list(trx_data.values()))
                     
-                    # 2. [PERBAIKAN UTAMA] Jika transaksi kosong, buat DATA DUMMY dari sales_report
-                    # Ini agar tanggal tersebut tetap muncul di dashboard meskipun omset 0
+                    # 2. Jika transaksi kosong, buat DATA DUMMY dari sales_report
                     elif 'sales_report' in content:
                         report = content['sales_report']
                         dummy_trx = {
                             "order_id": f"REPORT-{date_key}",
                             "unique_code": "DAILY-CLOSE",
-                            "timestamp": f"{date_key} 23:59:59", # Set waktu akhir hari
+                            "timestamp": f"{date_key} 23:59:59", 
                             "total_final": report.get('total_sales', 0),
                             "items": [], # Item kosong
                             "status": "completed",
@@ -284,6 +280,17 @@ def process_data_for_analysis(history_data, menu_data):
                         "Total Harga Item": i.get('quantity', i.get('qty', 1)) * i.get('price', 0)
                     })
         except: continue
+    
+    # [PERBAIKAN ERROR KEYERROR]
+    # Jika analysis kosong (misal belum ada item terjual hari ini), 
+    # return DataFrame kosong TAPI dengan kolom yang lengkap.
+    if not analysis:
+        return pd.DataFrame(columns=[
+            "Kode Unik", "Tanggal", "Waktu Mulai Order", "Jam", "Tipe Order", 
+            "Nama Menu", "Kategori (Asli)", "Kategori Utama", 
+            "Kuantitas Terjual", "Harga Satuan", "Total Harga Item"
+        ])
+
     return pd.DataFrame(analysis)
 
 def extract_main_category(category_name):
@@ -394,12 +401,18 @@ else:
         start_date = c1.date_input("Dari", min_d)
         end_date = c2.date_input("Sampai", max_d)
         
-        # Filter DataFrames
+        # [PERBAIKAN UTAMA: Filter Terpisah]
+        
+        # 1. Filter Data Transaksi
         if not df_display.empty:
             df_disp_fil = df_display[(df_display['Tanggal'] >= start_date) & (df_display['Tanggal'] <= end_date)]
-            df_anal_fil = df_analysis[(df_analysis['Tanggal'] >= start_date) & (df_analysis['Tanggal'] <= end_date)]
         else:
             df_disp_fil = pd.DataFrame()
+
+        # 2. Filter Data Analisis (Cek dulu apa kosong atau tidak)
+        if not df_analysis.empty:
+            df_anal_fil = df_analysis[(df_analysis['Tanggal'] >= start_date) & (df_analysis['Tanggal'] <= end_date)]
+        else:
             df_anal_fil = pd.DataFrame()
         
         # Hitung Promo Bun
