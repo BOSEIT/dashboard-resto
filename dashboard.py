@@ -20,7 +20,7 @@ st.set_page_config(layout="wide", page_title="Dashboard X-POS (Firestore)")
 # URL Database
 FIREBASE_DB_URL = 'https://xpos.asia-southeast1.firebasedatabase.app'
 
-# Data User Login (Hardcoded)
+# Data User Login
 VALID_USERS = {
     "Admin": "123",
     "Jason": "0000",
@@ -132,7 +132,7 @@ def fetch_data(branch_name, debug_mode=False):
 # --- MENU MANAGEMENT FUNCTIONS ---
 
 def fetch_menu_config(branch_name):
-    """Mengambil konfigurasi menu (Priority: Config > Last Report)."""
+    """Mengambil konfigurasi menu."""
     db = get_firestore_client()
     try:
         # 1. Coba ambil dari config khusus
@@ -220,14 +220,16 @@ def process_data_for_analysis(history_data, menu_data):
     cat_map = {}
     if isinstance(menu_data, dict):
         for c, items in menu_data.items():
-            if isinstance(items, list): 
+            # Handle Dict structure (e.g., "CALAMARI": {...})
+            if isinstance(items, dict):
+                 for k in items:
+                     cat_map[k] = c
+            # Handle List structure (e.g., [{name: "CALAMARI", ...}])
+            elif isinstance(items, list): 
                  for m_item in items:
                      if isinstance(m_item, dict):
                          nm = m_item.get('name')
                          if nm: cat_map[nm] = c
-            elif isinstance(items, dict):
-                 for k in items:
-                     cat_map[k] = c
 
     analysis = []
     for order in history_data:
@@ -332,31 +334,34 @@ else:
                     excel = create_excel_report(df_display, df_analysis)
                     st.download_button("Klik Download", excel.getvalue(), f"Laporan_{selected_branch}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # --- TAB 3: LIHAT MENU (PERBAIKAN TAMPILAN) ---
+        # --- TAB 3: LIHAT MENU (READ ONLY) ---
         with tab_menu_view:
             st.subheader(f"Daftar Menu Aktif - {selected_branch}")
-            # Logic flattening untuk View (Read Only)
             view_data = []
+            
             if current_menu_config:
+                # Loop semua Kategori (e.g., "APPETIZER (FOOD)")
                 for category, items in current_menu_config.items():
-                    # Handle jika items List
-                    if isinstance(items, list):
+                    # Jika struktur item adalah Dictionary { "NamaItem": { detail } }
+                    if isinstance(items, dict):
+                        for k, v in items.items():
+                            view_data.append({
+                                "Kategori": category,
+                                "Nama Menu": k,
+                                "Harga": float(v.get('price', 0)),
+                                "Harga Online": float(v.get('online_price', 0)),
+                                "Printer": v.get('printer', 'KITCHEN')
+                            })
+                    # Jika struktur item adalah List [{ "name": "...", "price": ... }]
+                    elif isinstance(items, list):
                         for item in items:
                             if isinstance(item, dict):
                                 view_data.append({
                                     "Kategori": category,
                                     "Nama Menu": item.get('name', ''),
                                     "Harga": float(item.get('price', 0)),
-                                    "Printer": item.get('printer', 'kitchen')
-                                })
-                    # Handle jika items Dict (Legacy)
-                    elif isinstance(items, dict):
-                         for k, v in items.items():
-                             view_data.append({
-                                    "Kategori": category,
-                                    "Nama Menu": k,
-                                    "Harga": float(v.get('price', 0)),
-                                    "Printer": v.get('printer', 'kitchen')
+                                    "Harga Online": float(item.get('online_price', 0)),
+                                    "Printer": item.get('printer', 'KITCHEN')
                                 })
             
             if view_data:
@@ -366,61 +371,81 @@ else:
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "Harga": st.column_config.NumberColumn(format="Rp %d")
+                        "Harga": st.column_config.NumberColumn(format="Rp %d"),
+                        "Harga Online": st.column_config.NumberColumn(format="Rp %d"),
                     }
                 )
             else:
                 st.info("Data menu belum tersedia.")
 
-        # --- TAB 4: EDITOR MENU (PERBAIKAN EDITOR) ---
+        # --- TAB 4: EDITOR MENU (REVISI) ---
         with tab_menu_edit:
             st.subheader(f"🛠️ Editor Menu - {selected_branch}")
-            st.info("Edit menu di bawah ini. Pastikan klik 'Simpan' setelah selesai.")
+            st.info("Edit menu di bawah ini. 'Online Price' sudah ditambahkan.")
             
-            # 1. Prepare Data for Editor
+            # 1. Prepare Data for Editor (Flattening)
             edit_data = []
+            known_categories = set() # Untuk menyimpan kategori yang sudah ada
+            
+            # Kategori default jika belum ada data sama sekali
+            default_categories = ["FOOD", "BEVERAGE", "SNACK", "OTHERS", "PAKET", "APPETIZER (FOOD)", "MAIN COURSE (FOOD)"]
+
             if current_menu_config:
                 for category, items in current_menu_config.items():
-                    if isinstance(items, list):
+                    known_categories.add(category)
+                    
+                    # Logic membaca data yang sama seperti View
+                    if isinstance(items, dict): # Format Dict of Dicts (Yang kamu pakai sekarang)
+                        for k, v in items.items():
+                             edit_data.append({
+                                    "Kategori": category,
+                                    "Nama Menu": k,
+                                    "Harga": float(v.get('price', 0)),
+                                    "Harga Online": float(v.get('online_price', 0)),
+                                    "Printer": v.get('printer', 'KITCHEN')
+                                })
+                    elif isinstance(items, list): # Format List (Legacy/Cadangan)
                         for item in items:
                             if isinstance(item, dict):
                                 edit_data.append({
                                     "Kategori": category,
                                     "Nama Menu": item.get('name', ''),
                                     "Harga": float(item.get('price', 0)),
-                                    "Printer": item.get('printer', 'kitchen')
-                                })
-                    elif isinstance(items, dict):
-                        for k, v in items.items():
-                             edit_data.append({
-                                    "Kategori": category,
-                                    "Nama Menu": k,
-                                    "Harga": float(v.get('price', 0)),
-                                    "Printer": v.get('printer', 'kitchen')
+                                    "Harga Online": float(item.get('online_price', 0)),
+                                    "Printer": item.get('printer', 'KITCHEN')
                                 })
 
-            # Jika kosong, buat kerangka DataFrame agar kolom tetap muncul
+            # Gabungkan kategori yang ditemukan + default
+            all_cat_options = list(known_categories.union(set(default_categories)))
+            all_cat_options.sort()
+
+            # Placeholder row jika kosong
             if not edit_data:
-                # Placeholder row biar user tahu cara isi
-                edit_data.append({"Kategori": "FOOD", "Nama Menu": "Contoh Menu", "Harga": 0, "Printer": "kitchen"})
+                edit_data.append({
+                    "Kategori": "APPETIZER (FOOD)", 
+                    "Nama Menu": "CALAMARI", 
+                    "Harga": 48000, 
+                    "Harga Online": 57600, 
+                    "Printer": "KITCHEN"
+                })
 
             df_editor_source = pd.DataFrame(edit_data)
 
-            # 2. Show Editor (PERBAIKAN: Definisi Kolom Eksplisit)
+            # 2. Show Editor
+            # Urutan kolom kita paksa rapi
+            column_order = ["Kategori", "Nama Menu", "Harga", "Harga Online", "Printer"]
+            
             edited_df = st.data_editor(
                 df_editor_source,
                 num_rows="dynamic",
                 use_container_width=True,
                 hide_index=True,
-                column_order=["Kategori", "Nama Menu", "Harga", "Printer"], # Paksa urutan
+                column_order=column_order,
                 column_config={
                     "Kategori": st.column_config.SelectboxColumn(
                         "Kategori",
                         width="medium",
-                        options=[
-                            "FOOD", "BEVERAGE", "SNACK", "OTHERS", 
-                            "PAKET", "ADD-ON", "COFFEE", "NON-COFFEE"
-                        ],
+                        options=all_cat_options, # Opsi dinamis dari data yg ada
                         required=True
                     ),
                     "Nama Menu": st.column_config.TextColumn(
@@ -432,15 +457,22 @@ else:
                         "Harga (Rp)",
                         format="%d",
                         min_value=0,
-                        step=1000,
+                        step=500,
+                        width="small",
+                        required=True
+                    ),
+                    "Harga Online": st.column_config.NumberColumn(
+                        "Harga Online (Rp)",
+                        format="%d",
+                        min_value=0,
+                        step=500,
                         width="small",
                         required=True
                     ),
                     "Printer": st.column_config.SelectboxColumn(
                         "Target Printer",
                         width="medium",
-                        options=["kitchen", "bar", "cashier", "pastry"],
-                        help="Printer mana yang akan mencetak pesanan ini?",
+                        options=["KITCHEN", "BAR", "CASHIER", "PASTRY"], # Disamakan uppercase biar rapi
                         required=True
                     )
                 }
@@ -448,22 +480,30 @@ else:
 
             # 3. Save Button
             if st.button("💾 Simpan Perubahan ke Cloud", type="primary"):
+                # Kita akan membangun ulang Dictionary of Dictionaries
+                # Struktur: { "APPETIZER (FOOD)": { "CALAMARI": { "price": ..., "printer": ... } } }
+                
                 new_menu_dict = {}
                 try:
                     for index, row in edited_df.iterrows():
                         cat = row['Kategori'].strip() if row['Kategori'] else "OTHERS"
                         name = str(row['Nama Menu']).strip()
                         price = float(row['Harga'])
+                        online_price = float(row['Harga Online'])
                         printer = row['Printer']
                         
                         if not name: continue
                         
-                        if cat not in new_menu_dict: new_menu_dict[cat] = []
-                        new_menu_dict[cat].append({
-                            "name": name,
+                        # Inisialisasi Kategori jika belum ada
+                        if cat not in new_menu_dict: 
+                            new_menu_dict[cat] = {} # Perhatikan: Ini DICT, bukan LIST
+                        
+                        # Masukkan Item sebagai Key di dalam Dict Kategori
+                        new_menu_dict[cat][name] = {
                             "price": price,
+                            "online_price": online_price,
                             "printer": printer
-                        })
+                        }
                     
                     with st.spinner("Menyimpan ke Cloud..."):
                         success, msg = save_menu_config_to_cloud(selected_branch, new_menu_dict)
