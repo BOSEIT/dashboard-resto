@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, firestore
 from io import BytesIO
 from datetime import datetime, date
 import altair as alt
@@ -15,9 +15,9 @@ import json
 # 1. KONFIGURASI & LOGIN
 # ==============================================================================
 
-st.set_page_config(layout="wide", page_title="Dashboard X-POS")
+st.set_page_config(layout="wide", page_title="Dashboard X-POS (Firestore)")
 
-# URL Database Firebase
+# URL Database (Tidak terlalu dipake di Firestore, tapi tetap disimpan untuk init)
 FIREBASE_DB_URL = 'https://xpos.asia-southeast1.firebasedatabase.app'
 
 # Data User Login (Hardcoded)
@@ -59,116 +59,131 @@ def logout():
     st.rerun()
 
 # ==============================================================================
-# 2. FIREBASE & DATA FETCHING
+# 2. FIREBASE FIRESTORE & DATA FETCHING
 # ==============================================================================
 
 @st.cache_resource
 def initialize_firebase():
+    """Inisialisasi Firebase menggunakan Service Account."""
     try:
         if not firebase_admin._apps:
-            # 1. Prioritas: Cek Streamlit Secrets (Untuk Cloud Hosting)
+            # 1. Prioritas: Cek Streamlit Secrets
             if 'firebase_credentials' in st.secrets:
                 cred_info = dict(st.secrets['firebase_credentials'])
                 cred = credentials.Certificate(cred_info)
-                firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DB_URL})
+                firebase_admin.initialize_app(cred)
             
-            # 2. Fallback: Cek File Lokal (Untuk Localhost)
+            # 2. Fallback: Cek File Lokal
             else:
                 cred_file = None
-                if os.path.exists('firebase-credentials.json'):
-                    cred_file = 'firebase-credentials.json'
-                elif os.path.exists('firebase-credentials.json.json'):
-                    cred_file = 'firebase-credentials.json.json'
-                elif os.path.exists('serviceAccountKey.json'):
-                    cred_file = 'serviceAccountKey.json'
+                # Cek beberapa kemungkinan nama file credential
+                possible_files = ['serviceAccountKey.json', 'firebase-credentials.json']
+                for f in possible_files:
+                    if os.path.exists(f):
+                        cred_file = f
+                        break
                 
                 if cred_file:
                     cred = credentials.Certificate(cred_file)
-                    firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DB_URL})
+                    firebase_admin.initialize_app(cred)
                 else:
-                    st.error("⚠️ FILE KUNCI TIDAK DITEMUKAN! (Cek secrets atau file json)")
+                    st.error("⚠️ FILE KUNCI (serviceAccountKey.json) TIDAK DITEMUKAN!")
                     st.stop()
     except Exception as e:
-        st.error(f"Firebase Error: {e}"); st.stop()
+        st.error(f"Firebase Init Error: {e}"); st.stop()
+
+def get_firestore_client():
+    return firestore.client()
 
 def fetch_data(branch_name, debug_mode=False):
-    # Tidak pakai cache saat debug
+    """
+    Mengambil data transaksi dari Cloud Firestore.
+    Path: branches/{branch_name}/daily_reports/{date_doc}
+    """
     if debug_mode:
         st.cache_data.clear()
         
     try:
-        # Ambil data history
-        ref = db.reference(f'/{branch_name}/history') 
-        data = ref.get()
+        db = get_firestore_client()
+        # Referensi ke collection daily_reports cabang terkait
+        reports_ref = db.collection('branches').document(branch_name).collection('daily_reports')
         
-        if debug_mode:
-            st.info(f"🔍 Debug Path: /{branch_name}/history")
-            if data:
-                st.write("Data Tanggal Ditemukan:", list(data.keys()))
-            else:
-                st.warning("Data History Kosong / None")
-
+        # Ambil semua dokumen (semua tanggal)
+        # Note: Jika data sangat banyak, sebaiknya di-limit atau filter by date range query
+        docs = reports_ref.stream()
+        
         all_transactions = []
-        if data and isinstance(data, dict):
-            for date_key, content in data.items():
-                if isinstance(content, dict):
-                    # 1. Cek apakah ada detail TRANSAKSI
-                    trx_data = content.get('transactions')
-                    
-                    if trx_data:
-                        if isinstance(trx_data, list):
-                            all_transactions.extend([t for t in trx_data if t])
-                        elif isinstance(trx_data, dict):
-                            all_transactions.extend(list(trx_data.values()))
-                    
-                    # 2. Jika transaksi kosong, buat DATA DUMMY dari sales_report
-                    elif 'sales_report' in content:
-                        report = content['sales_report']
-                        dummy_trx = {
-                            "order_id": f"REPORT-{date_key}",
-                            "unique_code": "DAILY-CLOSE",
-                            "timestamp": f"{date_key} 23:59:59", 
-                            "total_final": report.get('total_sales', 0),
-                            "items": [], # Item kosong
-                            "status": "completed",
-                            "order_type": "Laporan Harian",
-                            "payment_method": "-",
-                            "discount_amount": 0,
-                            "service_charge": 0,
-                            "tax_pb1": 0
-                        }
-                        all_transactions.append(dummy_trx)
-        
+        found_dates = []
+
+        for doc in docs:
+            data = doc.to_dict()
+            date_key = doc.id
+            found_dates.append(date_key)
+            
+            # Ambil list transaksi dari field 'transactions'
+            trx_list = data.get('transactions', [])
+            
+            if trx_list and isinstance(trx_list, list):
+                all_transactions.extend(trx_list)
+            
+            # Jika transaksi kosong tapi ada summary, buat dummy (fallback logic)
+            elif 'summary' in data:
+                summary = data['summary']
+                if summary.get('total_sales', 0) > 0:
+                    dummy_trx = {
+                        "order_id": f"Z-REPORT-{date_key}",
+                        "unique_code": "DAILY-CLOSE",
+                        "timestamp": f"{date_key} 23:59:59", 
+                        "total_final": summary.get('total_sales', 0),
+                        "items": [], 
+                        "status": "completed",
+                        "order_type": "Laporan Harian",
+                        "payment_method": "Rekap Manual",
+                        "discount_amount": 0,
+                        "service_charge": 0,
+                        "tax_pb1": 0
+                    }
+                    all_transactions.append(dummy_trx)
+
+        if debug_mode:
+            st.info(f"🔍 Firestore Path: branches/{branch_name}/daily_reports")
+            st.write(f"📅 Tanggal ditemukan: {len(found_dates)} hari")
+            st.write(found_dates)
+            
         return all_transactions
+
     except Exception as e:
         if debug_mode: st.error(f"Fetch Error: {e}")
         return []
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60) # Cache 60 detik
 def fetch_menu(branch_name):
+    """
+    Mengambil Master Menu dari laporan terakhir yang diupload ke Firestore.
+    Karna kita menyertakan 'master_data' di setiap upload Z-Report.
+    """
     try:
-        ref = db.reference(f'/{branch_name}/master/menu')
-        data = ref.get()
-        return data if data else {}
+        db = get_firestore_client()
+        # Query 1 dokumen terakhir berdasarkan tanggal (descending)
+        docs = db.collection('branches').document(branch_name).collection('daily_reports')\
+                 .order_by('date', direction=firestore.Query.DESCENDING).limit(1).stream()
+        
+        for doc in docs:
+            data = doc.to_dict()
+            # Ambil master_data -> menu
+            return data.get('master_data', {}).get('menu', {})
+            
+        return {}
     except: return {}
 
+# NOTE: Fungsi Edit Menu dinonaktifkan sementara karena dashboard ini Read-Only dari Cloud
+# POS lokal adalah sumber kebenaran (Source of Truth).
 def log_activity(branch, user, action, details):
-    try:
-        ref = db.reference(f'/{branch}/activity_log')
-        ref.push({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "user": user, "action": action, "details": details})
-    except: pass
+    pass 
 
 def update_menu_item(branch, cat, name, data):
-    try: db.reference(f'/{branch}/master/menu/{cat}/{name}').update(data); return True
-    except: return False
-
-def add_menu_item(branch, cat, name, data):
-    try: db.reference(f'/{branch}/master/menu/{cat}/{name}').set(data); return True
-    except: return False
-
-def delete_menu_item(branch, cat, name):
-    try: db.reference(f'/{branch}/master/menu/{cat}/{name}').delete(); return True
-    except: return False
+    st.warning("Fitur edit dimatikan. Silakan edit menu dari Aplikasi Kasir (POS) Local.")
+    return False
 
 # ==============================================================================
 # 3. DATA PROCESSING
@@ -180,7 +195,11 @@ def _calculate_promo_bun_sales(history_data, start_datetime, end_datetime):
         try:
             ts = order.get('timestamp') or order.get('completed_time')
             if not ts: continue
-            ot = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            try:
+                ot = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            except:
+                # Fallback jika format timestamp berbeda (misal dari Firestore timestamp object)
+                ot = datetime.fromisoformat(str(ts).replace('Z', ''))
         except: continue
 
         if start_datetime <= ot <= end_datetime:
@@ -200,13 +219,6 @@ def _calculate_promo_bun_sales(history_data, start_datetime, end_datetime):
                          bun_sales_count[nm] = bun_sales_count.get(nm, 0) + qty
     return bun_sales_count
 
-def calculate_grand_total(subtotal, discount_val=0):
-    subtotal = float(subtotal)
-    service = subtotal * 0.05
-    tax = (subtotal + service) * 0.10
-    total = subtotal + service + tax - float(discount_val)
-    return {'subtotal': subtotal, 'tax': tax, 'service': service, 'discount': discount_val, 'total': total}
-
 def process_data_for_display(history_data):
     processed = []
     for order in history_data:
@@ -214,12 +226,15 @@ def process_data_for_display(history_data):
             items = order.get('items', [])
             if isinstance(items, dict): items = list(items.values())
             
-            subtotal = sum(i.get('price', 0) * i.get('quantity', i.get('qty', 1)) for i in items)
-            grand_total = order.get('total_final', order.get('total', 0))
+            subtotal = sum(float(i.get('price', 0)) * float(i.get('quantity', i.get('qty', 1))) for i in items)
+            grand_total = float(order.get('total_final', order.get('total', 0)))
             
             ts = order.get('timestamp') or order.get('completed_time')
             if ts:
-                ot = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                try:
+                    ot = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                except: continue # Skip invalid date format
+
                 pay_method = order.get('payment_method', '-')
                 if isinstance(pay_method, list): pay_method = ", ".join(pay_method)
                 
@@ -239,11 +254,14 @@ def process_data_for_display(history_data):
                     "Pajak (10%)": float(order.get('tax_pb1', 0)),
                     "Detail Pembayaran": [{"method": pay_method, "amount": grand_total}] 
                 })
-        except: continue
+        except Exception as e: 
+            # print(f"Skip Error: {e}")
+            continue
     return pd.DataFrame(processed)
 
 def process_data_for_analysis(history_data, menu_data):
     cat_map, main_map = {}, {}
+    # Flatten menu data untuk mapping kategori
     if isinstance(menu_data, dict):
         for c, items in menu_data.items():
             main = extract_main_category(c)
@@ -251,21 +269,33 @@ def process_data_for_analysis(history_data, menu_data):
                 for k in items:
                     cat_map[k] = c
                     main_map[k] = main
-    
+            elif isinstance(items, list): # Handle jika menu format list
+                 for m_item in items:
+                     if isinstance(m_item, dict):
+                         nm = m_item.get('name')
+                         if nm:
+                             cat_map[nm] = c
+                             main_map[nm] = main
+
     analysis = []
     for order in history_data:
         try:
             items = order.get('items', [])
             if isinstance(items, dict): items = list(items.values())
             
-            # Skip jika items kosong (dari dummy report)
             if not items: continue
 
             ts = order.get('timestamp')
             if ts:
-                ot = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                try:
+                    ot = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                except: continue
+
                 for i in items:
                     nm = i.get('name', 'N/A')
+                    qty = float(i.get('quantity', i.get('qty', 1)))
+                    price = float(i.get('price', 0))
+                    
                     analysis.append({
                         "Kode Unik": order.get('order_id', order.get('unique_code', 'N/A')),
                         "Tanggal": ot.date(),
@@ -275,15 +305,12 @@ def process_data_for_analysis(history_data, menu_data):
                         "Nama Menu": nm,
                         "Kategori (Asli)": cat_map.get(nm, 'Lain-lain'),
                         "Kategori Utama": main_map.get(nm, 'Lain-lain'),
-                        "Kuantitas Terjual": i.get('quantity', i.get('qty', 1)),
-                        "Harga Satuan": i.get('price', 0),
-                        "Total Harga Item": i.get('quantity', i.get('qty', 1)) * i.get('price', 0)
+                        "Kuantitas Terjual": qty,
+                        "Harga Satuan": price,
+                        "Total Harga Item": qty * price
                     })
         except: continue
     
-    # [PERBAIKAN ERROR KEYERROR]
-    # Jika analysis kosong (misal belum ada item terjual hari ini), 
-    # return DataFrame kosong TAPI dengan kolom yang lengkap.
     if not analysis:
         return pd.DataFrame(columns=[
             "Kode Unik", "Tanggal", "Waktu Mulai Order", "Jam", "Tipe Order", 
@@ -366,20 +393,21 @@ else:
             logout()
         
         st.divider()
-        debug_mode = st.checkbox("🔧 Mode Debug", value=False, help="Centang untuk melihat raw data Firebase.")
+        debug_mode = st.checkbox("🔧 Mode Debug", value=False, help="Centang untuk melihat raw data Firestore.")
     
-    st.title(f"📊 Dashboard Monitoring")
+    st.title(f"📊 Dashboard Monitoring (Cloud)")
     initialize_firebase()
 
+    # Daftar Cabang (Sesuaikan dengan nama dokumen di Collection 'branches' di Firestore)
     branches = ["COLEGA_PIK", "HOKEE_PIK", "HOKEE_KG", "Testing"]
     selected_branch = st.selectbox("Pilih Cabang:", branches)
 
     if selected_branch:
-        with st.spinner("Memuat data..."):
+        with st.spinner("Memuat data dari Cloud Firestore..."):
             history_data = fetch_data(selected_branch, debug_mode)
             menu_data = fetch_menu(selected_branch)
 
-        tab1, tab2, tab_menu = st.tabs(["📈 Ringkasan & KPI", "📄 Data Detail", "🍔 Manajemen Menu"])
+        tab1, tab2, tab_menu = st.tabs(["📈 Ringkasan & KPI", "📄 Data Detail", "🍔 Lihat Menu"])
 
         # DATA PROCESSING
         df_display = process_data_for_display(history_data)
@@ -389,11 +417,15 @@ else:
         st.subheader("Filter Periode")
         c1, c2 = st.columns(2)
         
-        # Default date
+        # Default date logic
         def_date = date.today()
         if not df_display.empty:
-            min_d = df_display['Tanggal'].min()
-            max_d = df_display['Tanggal'].max()
+            try:
+                min_d = df_display['Tanggal'].min()
+                max_d = df_display['Tanggal'].max()
+            except:
+                min_d = def_date
+                max_d = def_date
         else:
             min_d = def_date
             max_d = def_date
@@ -401,21 +433,18 @@ else:
         start_date = c1.date_input("Dari", min_d)
         end_date = c2.date_input("Sampai", max_d)
         
-        # [PERBAIKAN UTAMA: Filter Terpisah]
-        
-        # 1. Filter Data Transaksi
+        # Filter Logic
         if not df_display.empty:
             df_disp_fil = df_display[(df_display['Tanggal'] >= start_date) & (df_display['Tanggal'] <= end_date)]
         else:
             df_disp_fil = pd.DataFrame()
 
-        # 2. Filter Data Analisis (Cek dulu apa kosong atau tidak)
         if not df_analysis.empty:
             df_anal_fil = df_analysis[(df_analysis['Tanggal'] >= start_date) & (df_analysis['Tanggal'] <= end_date)]
         else:
             df_anal_fil = pd.DataFrame()
         
-        # Hitung Promo Bun
+        # Promo Bun Calculation
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date, datetime.max.time())
         promo_bun = _calculate_promo_bun_sales(history_data, start_dt, end_dt)
@@ -428,8 +457,11 @@ else:
             k1.metric("Total Omset", f"Rp {tot:,.0f}")
             k2.metric("Total Transaksi", trx)
             
-            if trx == 0 and history_data:
-                st.info("Ada data 'End Day' tapi belum ada penjualan (0 transaksi).")
+            if trx == 0:
+                if history_data:
+                    st.info("Data ditemukan, tapi tidak ada transaksi di rentang tanggal ini.")
+                else:
+                    st.warning("Data kosong di Cloud untuk cabang ini.")
 
             if not df_disp_fil.empty:
                 chart_data = df_disp_fil.groupby('Tanggal')['Grand Total'].sum().reset_index()
@@ -455,31 +487,27 @@ else:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-        # TAB 3: MENU
+        # TAB 3: MENU (READ ONLY)
         with tab_menu:
-            st.write(f"### Menu Editor: {selected_branch}")
+            st.write(f"### Menu Terakhir ({selected_branch})")
+            st.caption("Data menu diambil dari upload End-Day terakhir.")
+            
             if not menu_data:
-                st.warning("Data Menu Kosong. Cek path '/master/menu' di Firebase.")
+                st.warning("Data Menu belum tersedia di Cloud. Lakukan 'End Day' di POS setidaknya sekali.")
             else:
                 mlist = []
+                # Handle variasi struktur menu
                 for c, items in menu_data.items():
                     if isinstance(items, dict):
                         for k, v in items.items():
                             mlist.append({"Kategori": c, "Nama": k, "Harga": v.get('price',0)})
-                
+                    elif isinstance(items, list):
+                        for item in items:
+                            if isinstance(item, dict):
+                                mlist.append({"Kategori": c, "Nama": item.get('name'), "Harga": item.get('price',0)})
+
                 df_m_view = pd.DataFrame(mlist)
                 if not df_m_view.empty:
                     st.dataframe(df_m_view, use_container_width=True)
-                    
-                    with st.expander("✏️ Edit Harga Menu"):
-                        target = st.selectbox("Pilih Menu", ["--"] + sorted([m['Nama'] for m in mlist]))
-                        if target != "--":
-                            ct = next(m['Kategori'] for m in mlist if m['Nama'] == target)
-                            op = next(m['Harga'] for m in mlist if m['Nama'] == target)
-                            np = st.number_input("Harga Baru", value=int(op), step=1000)
-                            if st.button("Simpan Perubahan"):
-                                update_menu_item(selected_branch, ct, target, {"price": np})
-                                log_activity(selected_branch, st.session_state['user_name'], "Edit Harga", f"{target}: {np}")
-                                st.success("Tersimpan!"); time.sleep(1); st.rerun()
                 else:
-                    st.info("Struktur menu tidak sesuai format.")
+                    st.info("Format menu tidak dikenali.")
