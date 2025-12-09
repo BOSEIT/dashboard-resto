@@ -15,9 +15,12 @@ import json
 # 1. KONFIGURASI & LOGIN
 # ==============================================================================
 
-st.set_page_config(layout="wide", page_title="Dashboard X-POS Analyst")
+st.set_page_config(layout="wide", page_title="Dashboard X-POS (Firestore)")
 
-# Validasi User
+# URL Database (Tidak terlalu dipake di Firestore, tapi tetap disimpan untuk init)
+FIREBASE_DB_URL = 'https://xpos.asia-southeast1.firebasedatabase.app'
+
+# Data User Login (Hardcoded)
 VALID_USERS = {
     "Admin": "123",
     "Jason": "0000",
@@ -26,6 +29,7 @@ VALID_USERS = {
     "Sandy": "0908"
 }
 
+# Init Session
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 if 'user_name' not in st.session_state:
@@ -63,10 +67,13 @@ def initialize_firebase():
     """Inisialisasi Firebase menggunakan Service Account."""
     try:
         if not firebase_admin._apps:
+            # 1. Prioritas: Cek Streamlit Secrets
             if 'firebase_credentials' in st.secrets:
                 cred_info = dict(st.secrets['firebase_credentials'])
                 cred = credentials.Certificate(cred_info)
                 firebase_admin.initialize_app(cred)
+            
+            # 2. Fallback: Cek File Lokal
             else:
                 cred_file = None
                 possible_files = ['serviceAccountKey.json', 'firebase-credentials.json']
@@ -79,7 +86,7 @@ def initialize_firebase():
                     cred = credentials.Certificate(cred_file)
                     firebase_admin.initialize_app(cred)
                 else:
-                    st.error("⚠️ FILE KUNCI TIDAK DITEMUKAN!")
+                    st.error("⚠️ FILE KUNCI (serviceAccountKey.json) TIDAK DITEMUKAN!")
                     st.stop()
     except Exception as e:
         st.error(f"Firebase Init Error: {e}"); st.stop()
@@ -90,6 +97,7 @@ def get_firestore_client():
 def fetch_data(branch_name, debug_mode=False):
     """
     Mengambil data transaksi dari Cloud Firestore.
+    Path: branches/{branch_name}/daily_reports/{date_doc}
     """
     if debug_mode:
         st.cache_data.clear()
@@ -98,40 +106,50 @@ def fetch_data(branch_name, debug_mode=False):
         db = get_firestore_client()
         reports_ref = db.collection('branches').document(branch_name).collection('daily_reports')
         
+        # Ambil semua dokumen
         docs = reports_ref.stream()
         
         all_transactions = []
         found_dates = []
-        debug_info = []
 
         for doc in docs:
             data = doc.to_dict()
             date_key = doc.id
             found_dates.append(date_key)
             
-            raw_trx = data.get('transactions', [])
+            trx_list = data.get('transactions', [])
             
-            # [PENTING] Filter hanya tipe 'payment_success'
-            valid_orders = []
-            if raw_trx and isinstance(raw_trx, list):
-                for t in raw_trx:
-                    if not t.get('timestamp'):
-                         t['timestamp'] = f"{date_key} 12:00:00"
-                    valid_orders.append(t)
+            # --- DEBUG BLOCK (Hanya muncul jika mode debug aktif) ---
+            if debug_mode and len(found_dates) == 1:
+                st.write(f"🔍 DEBUG: Contoh Data Raw (Tanggal: {date_key})")
+                st.json(trx_list[0] if trx_list else {"Info": "List transaksi kosong"})
+            # --------------------------------------------------------
+
+            if trx_list and isinstance(trx_list, list):
+                all_transactions.extend(trx_list)
             
-            if valid_orders:
-                all_transactions.extend(valid_orders)
-                debug_info.append(f"📅 {date_key}: {len(valid_orders)} logs found")
-            else:
-                debug_info.append(f"📅 {date_key}: 0 logs (Empty)")
+            # Fallback jika transaksi kosong tapi ada summary (Data Manual/Lama)
+            elif 'summary' in data:
+                summary = data['summary']
+                if summary.get('total_sales', 0) > 0:
+                    dummy_trx = {
+                        "order_id": f"Z-REPORT-{date_key}",
+                        "unique_code": "DAILY-CLOSE",
+                        "timestamp": f"{date_key} 23:59:59", 
+                        "total_final": summary.get('total_sales', 0),
+                        "items": [], 
+                        "status": "completed",
+                        "order_type": "Laporan Harian",
+                        "payment_method": "Rekap Manual",
+                        "discount_amount": 0,
+                        "service_charge": 0,
+                        "tax_pb1": 0
+                    }
+                    all_transactions.append(dummy_trx)
 
         if debug_mode:
-            st.info(f"🔍 Path: branches/{branch_name}/daily_reports")
-            with st.expander("Detail Dokumen Ditemukan"):
-                for d in debug_info: st.write(d)
-                if all_transactions:
-                    st.write("--- CONTOH DATA RAW PERTAMA ---")
-                    st.json(all_transactions[0])
+            st.info(f"🔍 Firestore Path: branches/{branch_name}/daily_reports")
+            st.write(f"📅 Tanggal ditemukan: {len(found_dates)} hari")
             
         return all_transactions
 
@@ -139,107 +157,145 @@ def fetch_data(branch_name, debug_mode=False):
         if debug_mode: st.error(f"Fetch Error: {e}")
         return []
 
-@st.cache_data(ttl=60)
-def fetch_menu(branch_name):
+# --- MENU MANAGEMENT FUNCTIONS (BARU) ---
+
+def fetch_menu_config(branch_name):
+    """
+    Mengambil konfigurasi menu yang bisa diedit.
+    Logic:
+    1. Cek 'configuration/menu' (Menu yang sudah pernah diedit admin).
+    2. Jika kosong, ambil backup dari upload terakhir kasir ('daily_reports').
+    """
+    db = get_firestore_client()
     try:
-        db = get_firestore_client()
+        # 1. Coba ambil dari config khusus
+        config_ref = db.collection('branches').document(branch_name).collection('configuration').document('menu')
+        doc = config_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            return data.get('items', {})
+        
+        # 2. Fallback ke last daily report (ambil menu eksisting dari kasir)
         docs = db.collection('branches').document(branch_name).collection('daily_reports')\
                  .order_by('date', direction=firestore.Query.DESCENDING).limit(1).stream()
+        for d in docs:
+            # Struktur data report: master_data -> menu
+            return d.to_dict().get('master_data', {}).get('menu', {})
         
-        for doc in docs:
-            data = doc.to_dict()
-            return data.get('master_data', {}).get('menu', {})
+        return {} # Jika benar-benar kosong
+    except Exception as e:
+        st.error(f"Gagal ambil data menu: {e}")
         return {}
-    except: return {}
+
+def save_menu_config_to_cloud(branch_name, new_menu_data):
+    """
+    Menyimpan konfigurasi menu yang diedit ke Firestore.
+    Disimpan ke: branches/{branch}/configuration/menu
+    """
+    try:
+        db = get_firestore_client()
+        config_ref = db.collection('branches').document(branch_name).collection('configuration').document('menu')
+        
+        payload = {
+            "last_updated": firestore.SERVER_TIMESTAMP,
+            "updated_by": st.session_state.get('user_name', 'Admin'),
+            "items": new_menu_data
+        }
+        
+        config_ref.set(payload)
+        return True, "Menu berhasil disimpan ke Cloud! Kasir perlu tekan 'Download Menu' untuk update."
+    except Exception as e:
+        return False, f"Gagal simpan: {e}"
 
 # ==============================================================================
 # 3. DATA PROCESSING
 # ==============================================================================
 
 def parse_flexible_date(ts):
-    if not ts: return None
-    if hasattr(ts, 'date'): return ts
-    if isinstance(ts, (int, float)):
-        try: return datetime.fromtimestamp(ts if ts < 10000000000 else ts/1000)
-        except: pass
+    """Fungsi pembantu untuk membaca berbagai format tanggal."""
+    if not ts:
+        return None
+    
+    if hasattr(ts, 'date'): 
+        return ts
     
     ts_str = str(ts)
-    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"]:
+    try:
+        return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
         try:
-            return datetime.strptime(ts_str.split('.')[0], fmt)
-        except: continue
-    return None
+            return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+        except ValueError:
+            try:
+                d = datetime.strptime(ts_str, "%Y-%m-%d").date()
+                return datetime.combine(d, dt_time(0,0,0))
+            except:
+                return None
 
 def process_data_for_display(history_data):
     processed = []
     
     for order in history_data:
         try:
-            # [FILTER] Hanya ambil yang tipe 'payment_success'
-            if order.get('type') != 'payment_success':
-                continue
-
-            # Ambil Items
             items = order.get('items', [])
             if isinstance(items, dict): items = list(items.values())
             
-            subtotal = sum(float(i.get('price', 0)) * float(i.get('quantity', i.get('qty', 1))) for i in items)
             grand_total = float(order.get('total_final', order.get('total', 0)))
             
             ts = order.get('timestamp') or order.get('completed_time')
             ot = parse_flexible_date(ts)
 
             if ot:
-                pay_method = order.get('payment_method', '-')
-                # Ambil alasan diskon (nama promo)
-                disc_reason = order.get('discount_reason', '-')
-                if not disc_reason: disc_reason = "-"
+                if ot.tzinfo is not None:
+                    ot = ot.replace(tzinfo=None)
 
+                pay_method = order.get('payment_method', '-')
+                if isinstance(pay_method, list): pay_method = ", ".join(pay_method)
+                
                 processed.append({
                     "Kode Unik": order.get('order_id', order.get('unique_code', 'N/A')),
                     "Tanggal": ot.date(),
-                    "Jam": ot.hour, # Untuk analisa jam sibuk
                     "Waktu": ot.time(),
-                    "Tipe Order": order.get('order_type', 'Dine In'),
-                    "Meja": order.get('table_number', '-'),
-                    "Kasir": order.get('cashier', order.get('user', 'Staff')),
+                    "Tipe Order": order.get('order_type', 'N/A'),
+                    "Meja": order.get('table_number', 'N/A'),
                     "Grand Total": grand_total,
-                    "Subtotal": subtotal,
                     "Metode Bayar": pay_method,
-                    "Detail Item": ", ".join([f"{i.get('quantity', i.get('qty', 1))}x {i.get('name')}" for i in items]),
-                    "Diskon": float(order.get('discount_amount', 0)),
-                    "Nama Promo": disc_reason, # FIELD BARU
-                    "Service": float(order.get('service_charge', 0)),
-                    "Pajak": float(order.get('tax_pb1', 0)),
+                    "Detail Item": "; ".join([f"{i.get('quantity', i.get('qty', 1))}x {i.get('name')}" for i in items]),
                 })
-        except Exception as e: 
+        except: 
             continue
             
     return pd.DataFrame(processed)
 
-def process_item_analysis(history_data, menu_data):
-    # Mapping Kategori
+def process_data_for_analysis(history_data, menu_data):
+    # Buat mapping kategori sederhana
     cat_map = {}
     if isinstance(menu_data, dict):
         for c, items in menu_data.items():
-            if isinstance(items, dict):
-                for k in items: cat_map[k] = c
-            elif isinstance(items, list): 
-                 for m in items:
-                     if isinstance(m, dict): cat_map[m.get('name')] = c
+            if isinstance(items, list): 
+                 for m_item in items:
+                     if isinstance(m_item, dict):
+                         nm = m_item.get('name')
+                         if nm: cat_map[nm] = c
+            elif isinstance(items, dict): # Handle legacy format dict
+                 for k in items:
+                     cat_map[k] = c
 
     analysis = []
     for order in history_data:
         try:
-            if order.get('type') != 'payment_success': continue 
-
             items = order.get('items', [])
             if isinstance(items, dict): items = list(items.values())
             
-            ts = order.get('timestamp')
+            if not items: continue
+
+            ts = order.get('timestamp') or order.get('completed_time')
             ot = parse_flexible_date(ts)
             
             if ot:
+                if ot.tzinfo is not None:
+                    ot = ot.replace(tzinfo=None)
+
                 for i in items:
                     nm = i.get('name', 'N/A')
                     qty = float(i.get('quantity', i.get('qty', 1)))
@@ -250,29 +306,36 @@ def process_item_analysis(history_data, menu_data):
                         "Nama Menu": nm,
                         "Kategori": cat_map.get(nm, 'Lain-lain'),
                         "Qty": qty,
-                        "Total Omset": qty * price
+                        "Total": qty * price
                     })
         except: continue
     
     return pd.DataFrame(analysis)
 
 # ==============================================================================
-# 4. EXCEL EXPORT
+# 4. EXCEL GENERATOR
 # ==============================================================================
 def create_excel_report(df_display, df_analysis): 
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        
+        # SHEET 1: Data Transaksi
         if not df_display.empty:
-            df_display.drop(columns=['Jam'], errors='ignore').astype(str).to_excel(writer, index=False, sheet_name='Transaksi')
-            
-            # Sheet Khusus Promo
-            df_promo = df_display[df_display['Diskon'] > 0][['Tanggal', 'Kode Unik', 'Nama Promo', 'Diskon', 'Grand Total']]
-            if not df_promo.empty:
-                 df_promo.to_excel(writer, index=False, sheet_name='Laporan Promo')
+            df_out = df_display.copy()
+            df_out['Tanggal'] = df_out['Tanggal'].astype(str)
+            df_out['Waktu'] = df_out['Waktu'].astype(str)
+            df_out.to_excel(writer, index=False, sheet_name='Data Transaksi')
 
+        # SHEET 2: Analisa Menu
         if not df_analysis.empty:
-            df_analysis.astype(str).to_excel(writer, index=False, sheet_name='Analisa Item')
+            df_an = df_analysis.copy()
+            df_an['Tanggal'] = df_an['Tanggal'].astype(str)
+            df_an.to_excel(writer, index=False, sheet_name='Rincian Item')
             
+            # Pivot Summary
+            pivot = df_analysis.groupby('Nama Menu')['Qty'].sum().reset_index().sort_values('Qty', ascending=False)
+            pivot.to_excel(writer, index=False, sheet_name='Top Menu')
+
     return output
 
 # ==============================================================================
@@ -284,188 +347,209 @@ if not st.session_state['logged_in']:
 else:
     with st.sidebar:
         st.title("⚙️ Pengaturan")
-        st.write(f"User: **{st.session_state['user_name']}**")
-        if st.button("LOGOUT"): logout()
+        st.info(f"User: **{st.session_state['user_name']}**")
+        if st.button("LOGOUT", use_container_width=True):
+            logout()
+        
         st.divider()
-        debug_mode = st.checkbox("🔧 Mode Debug (Cek Raw Data)")
+        debug_mode = st.checkbox("🔧 Mode Debug", value=False, help="Centang untuk melihat raw data Firestore.")
     
-    st.title(f"📊 Dashboard Analyst")
+    st.title(f"📊 Dashboard Monitoring (Cloud)")
     initialize_firebase()
 
     branches = ["COLEGA_PIK", "HOKEE_PIK", "HOKEE_KG", "Testing"]
     selected_branch = st.selectbox("Pilih Cabang:", branches)
 
     if selected_branch:
-        with st.spinner("Menganalisa data..."):
+        # --- LOAD DATA SECTION ---
+        with st.spinner("Memuat data dari Cloud Firestore..."):
             history_data = fetch_data(selected_branch, debug_mode)
-            menu_data = fetch_menu(selected_branch)
+            # Fetch menu config untuk Editor
+            current_menu_config = fetch_menu_config(selected_branch)
 
-        # PROSES DATA
+        # --- TABS SECTION ---
+        # Kita tambah tab ke-4: "Editor Menu (Admin)"
+        tab1, tab2, tab_menu_view, tab_menu_edit = st.tabs([
+            "📈 Ringkasan & KPI", 
+            "📄 Data Detail", 
+            "🍔 Lihat Menu (Read-Only)",
+            "📝 Editor Menu (Admin)"
+        ])
+
+        # DATA PROCESSING
         df_display = process_data_for_display(history_data)
-        df_item_analysis = process_item_analysis(history_data, menu_data)
+        df_analysis = process_data_for_analysis(history_data, current_menu_config)
         
-        if df_display.empty and history_data:
-            st.warning("⚠️ Data ditemukan tapi tidak ada transaksi sukses (payment_success).")
-            if debug_mode: st.json(history_data[:3])
-
-        # FILTER TANGGAL
-        if not df_display.empty:
-            min_d, max_d = df_display['Tanggal'].min(), df_display['Tanggal'].max()
-        else:
-            min_d, max_d = date.today(), date.today()
+        # --- TAB 1: RINGKASAN ---
+        with tab1:
+            st.subheader("Ringkasan Penjualan")
             
-        c1, c2 = st.columns(2)
-        start_date = c1.date_input("Dari", min_d)
-        end_date = c2.date_input("Sampai", max_d)
-        
-        # APPLY FILTER
-        if not df_display.empty:
-            df_filt = df_display[(df_display['Tanggal'] >= start_date) & (df_display['Tanggal'] <= end_date)]
-            df_item_filt = df_item_analysis[(df_item_analysis['Tanggal'] >= start_date) & (df_item_analysis['Tanggal'] <= end_date)]
-        else:
-            df_filt = pd.DataFrame()
-            df_item_filt = pd.DataFrame()
-
-        # ==========================
-        # DASHBOARD ANALYST LAYOUT
-        # ==========================
-        
-        # --- METRIK UTAMA ---
-        st.markdown("### 1. Performansi Bisnis")
-        if not df_filt.empty:
-            tot_omset = df_filt['Grand Total'].sum()
-            tot_trx = len(df_filt)
-            tot_diskon = df_filt['Diskon'].sum()
-            # AOV (Average Order Value)
-            aov = tot_omset / tot_trx if tot_trx > 0 else 0
-            # Net Sales (Estimasi kasar tanpa Pajak & Service)
-            net_sales = df_filt['Subtotal'].sum() - tot_diskon
-
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Total Omset (Gross)", f"Rp {tot_omset:,.0f}")
-            m2.metric("Net Sales (Est.)", f"Rp {net_sales:,.0f}", help="Subtotal - Diskon")
-            m3.metric("Total Transaksi", tot_trx)
-            m4.metric("Rata2 Bill (AOV)", f"Rp {aov:,.0f}")
-            m5.metric("Total Diskon Keluar", f"Rp {tot_diskon:,.0f}", delta_color="inverse")
-        else:
-            st.info("Tidak ada data di periode ini.")
-
-        st.divider()
-
-        # --- TABS ANALISA ---
-        tabs = st.tabs(["🕒 Waktu & Pembayaran", "🍔 Menu & Kategori", "🏷️ Promo & Diskon", "📄 Data Transaksi"])
-        
-        # TAB 1: WAKTU & PAYMENT
-        with tabs[0]:
-            c_left, c_right = st.columns(2)
-            
-            with c_left:
-                st.subheader("Jam Sibuk (Peak Hours)")
-                if not df_filt.empty:
-                    # Group by Jam
-                    hourly = df_filt.groupby('Jam')['Kode Unik'].count().reset_index().rename(columns={'Kode Unik':'Jumlah Transaksi'})
-                    chart_hour = alt.Chart(hourly).mark_bar().encode(
-                        x=alt.X('Jam:O', title='Jam (24h)'),
-                        y=alt.Y('Jumlah Transaksi', title='Jml Transaksi'),
-                        color=alt.value('#FFAA00'),
-                        tooltip=['Jam', 'Jumlah Transaksi']
-                    ).properties(height=300)
-                    st.altair_chart(chart_hour, use_container_width=True)
-                else: st.write("-")
-
-            with c_right:
-                st.subheader("Metode Pembayaran")
-                if not df_filt.empty:
-                    pay_dist = df_filt.groupby('Metode Bayar')['Grand Total'].sum().reset_index()
-                    chart_pay = alt.Chart(pay_dist).mark_arc(innerRadius=50).encode(
-                        theta=alt.Theta(field="Grand Total", type="quantitative"),
-                        color=alt.Color(field="Metode Bayar", type="nominal"),
-                        tooltip=['Metode Bayar', 'Grand Total']
-                    ).properties(height=300)
-                    st.altair_chart(chart_pay, use_container_width=True)
-                    
-                    # Tabel kecil di bawah pie chart
-                    st.dataframe(pay_dist.set_index('Metode Bayar').style.format("Rp {:,.0f}"), use_container_width=True)
-                else: st.write("-")
-
-        # TAB 2: MENU & KATEGORI
-        with tabs[1]:
-            c_cat, c_menu = st.columns([1, 2])
-            
-            with c_cat:
-                st.subheader("Kontribusi Kategori")
-                if not df_item_filt.empty:
-                    cat_sales = df_item_filt.groupby('Kategori')['Total Omset'].sum().reset_index()
-                    chart_cat = alt.Chart(cat_sales).mark_arc().encode(
-                        theta='Total Omset',
-                        color='Kategori',
-                        tooltip=['Kategori', 'Total Omset']
-                    )
-                    st.altair_chart(chart_cat, use_container_width=True)
-                    st.dataframe(cat_sales.sort_values('Total Omset', ascending=False).style.format({'Total Omset': 'Rp {:,.0f}'}), hide_index=True)
-            
-            with c_menu:
-                st.subheader("Top 10 Menu Terlaris (Qty)")
-                if not df_item_filt.empty:
-                    top_menu = df_item_filt.groupby('Nama Menu')['Qty'].sum().reset_index().sort_values('Qty', ascending=False).head(10)
-                    chart_menu = alt.Chart(top_menu).mark_bar().encode(
-                        x='Qty',
-                        y=alt.Y('Nama Menu', sort='-x'),
-                        color=alt.value('#00AAFF'),
-                        tooltip=['Nama Menu', 'Qty']
-                    )
-                    st.altair_chart(chart_menu, use_container_width=True)
-
-        # TAB 3: PROMO & DISKON (NEW!)
-        with tabs[2]:
-            st.subheader("Analisa Penggunaan Promo")
-            
-            if not df_filt.empty:
-                # Filter hanya yang ada diskon
-                df_promo = df_filt[df_filt['Diskon'] > 0].copy()
+            # Filter Tanggal Sederhana (Opsional bisa diperluas)
+            if not df_display.empty:
+                min_date = df_display['Tanggal'].min()
+                max_date = df_display['Tanggal'].max()
                 
-                if df_promo.empty:
-                    st.info("Tidak ada transaksi dengan promo/diskon di periode ini.")
-                else:
-                    k1, k2 = st.columns(2)
-                    with k1:
-                        st.write("#### Distribusi Nama Promo")
-                        # Hitung frekuensi promo
-                        # Split jika ada koma (misal: "Opening, Member")
-                        all_promos = []
-                        for reason in df_promo['Nama Promo']:
-                            if reason and reason != '-':
-                                parts = [p.strip() for p in reason.split(',')]
-                                all_promos.extend(parts)
-                        
-                        if all_promos:
-                            promo_counts = pd.Series(all_promos).value_counts().reset_index()
-                            promo_counts.columns = ['Nama Promo', 'Frekuensi']
-                            
-                            chart_p = alt.Chart(promo_counts).mark_bar().encode(
-                                x='Frekuensi',
-                                y=alt.Y('Nama Promo', sort='-x'),
-                                color=alt.value('#FF4444'),
-                                tooltip=['Nama Promo', 'Frekuensi']
-                            )
-                            st.altair_chart(chart_p, use_container_width=True)
-                        else:
-                            st.write("Tidak ada nama promo spesifik tercatat.")
-
-                    with k2:
-                         st.write("#### Rincian Bill dengan Promo")
-                         st.dataframe(
-                             df_promo[['Tanggal', 'Jam', 'Kode Unik', 'Nama Promo', 'Diskon', 'Grand Total']]
-                             .sort_values('Diskon', ascending=False)
-                             .style.format({'Diskon': 'Rp {:,.0f}', 'Grand Total': 'Rp {:,.0f}'}),
-                             use_container_width=True
-                         )
+                c1, c2 = st.columns(2)
+                d1 = c1.date_input("Dari Tanggal", min_date)
+                d2 = c2.date_input("Sampai Tanggal", max_date)
+                
+                # Filter Dataframe
+                mask = (df_display['Tanggal'] >= d1) & (df_display['Tanggal'] <= d2)
+                df_filtered = df_display[mask]
+                
+                tot = df_filtered['Grand Total'].sum()
+                trx = len(df_filtered)
+                
+                k1, k2 = st.columns(2)
+                k1.metric("Total Omset (Periode Ini)", f"Rp {tot:,.0f}")
+                k2.metric("Total Transaksi", trx)
+                
+                # Chart
+                daily_chart = df_filtered.groupby('Tanggal')['Grand Total'].sum().reset_index()
+                st.altair_chart(alt.Chart(daily_chart).mark_bar().encode(
+                    x='Tanggal', y='Grand Total', tooltip=['Tanggal', 'Grand Total']
+                ).interactive(), use_container_width=True)
             else:
-                st.write("-")
+                st.info("Belum ada data transaksi yang masuk.")
 
-        # TAB 4: DATA RAW
-        with tabs[3]:
-            st.dataframe(df_filt, use_container_width=True)
-            if st.button("Download Laporan Lengkap (Excel)"):
-                excel = create_excel_report(df_filt, df_item_filt)
-                st.download_button("Klik Disini Untuk Download", excel.getvalue(), f"Laporan_{selected_branch}.xlsx")
+        # --- TAB 2: DATA DETAIL ---
+        with tab2:
+            if df_display.empty:
+                st.info("Tidak ada data transaksi detail untuk ditampilkan.")
+            else:
+                st.dataframe(df_display, use_container_width=True)
+                
+                if st.button("Download Excel Laporan"):
+                    excel = create_excel_report(df_display, df_analysis)
+                    st.download_button(
+                        label="Klik Disini Untuk Download",
+                        data=excel.getvalue(),
+                        file_name=f"Laporan_{selected_branch}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+        # --- TAB 3: MENU (READ ONLY - VIEW LAMA) ---
+        with tab_menu_view:
+            st.write(f"### Menu Terakhir ({selected_branch})")
+            st.caption("Ini adalah view read-only. Gunakan tab 'Editor Menu' untuk mengubah.")
+            
+            if not current_menu_config:
+                st.warning("Data Menu belum tersedia.")
+            else:
+                # Tampilkan JSON raw atau list sederhana
+                st.json(current_menu_config, expanded=False)
+
+        # --- TAB 4: EDITOR MENU (FITUR BARU) ---
+        with tab_menu_edit:
+            st.subheader(f"🛠️ Editor Menu - {selected_branch}")
+            st.markdown("""
+            **Cara Menggunakan:**
+            1. Edit nama, harga, atau kategori langsung di tabel di bawah.
+            2. Anda juga bisa **menambahkan baris baru** (klik baris kosong paling bawah).
+            3. Jika sudah selesai, klik tombol **"💾 Simpan Perubahan ke Cloud"**.
+            4. Di aplikasi Kasir, tekan tombol **"Download Menu"** agar perubahan terupdate.
+            """)
+            
+            # 1. PREPARE DATA FOR EDITOR
+            # Kita perlu meratakan (flatten) dictionary menu yang bersarang menjadi List of Dictionaries
+            # agar bisa ditampilkan di st.data_editor
+            
+            flat_menu_data = []
+            
+            if current_menu_config:
+                for category, items in current_menu_config.items():
+                    # Handle jika items adalah List (Standard Baru)
+                    if isinstance(items, list):
+                        for item in items:
+                            if isinstance(item, dict):
+                                flat_menu_data.append({
+                                    "Kategori": category,
+                                    "Nama Menu": item.get('name', ''),
+                                    "Harga": float(item.get('price', 0)),
+                                    "Printer": item.get('printer', 'kitchen') # Default kitchen
+                                })
+                    # Handle jika items adalah Dict (Legacy Format)
+                    elif isinstance(items, dict):
+                        for k, v in items.items():
+                             flat_menu_data.append({
+                                    "Kategori": category,
+                                    "Nama Menu": k,
+                                    "Harga": float(v.get('price', 0)),
+                                    "Printer": v.get('printer', 'kitchen')
+                                })
+
+            # Jika data kosong, kasih template row biar user ga bingung
+            if not flat_menu_data:
+                flat_menu_data.append({"Kategori": "FOOD", "Nama Menu": "Contoh Menu Baru", "Harga": 15000, "Printer": "kitchen"})
+
+            # Buat DataFrame
+            df_editor_source = pd.DataFrame(flat_menu_data)
+
+            # 2. SHOW EDITOR
+            edited_df = st.data_editor(
+                df_editor_source,
+                num_rows="dynamic", # Membolehkan user tambah/hapus baris
+                use_container_width=True,
+                column_config={
+                    "Harga": st.column_config.NumberColumn(
+                        "Harga (Rp)",
+                        format="Rp %d",
+                        min_value=0
+                    ),
+                    "Kategori": st.column_config.SelectboxColumn(
+                        "Kategori",
+                        options=["FOOD", "BEVERAGE", "SNACK", "OTHERS", "PAKET"], # Opsi bisa disesuaikan
+                        required=True
+                    ),
+                    "Printer": st.column_config.SelectboxColumn(
+                        "Target Printer",
+                        options=["kitchen", "bar", "cashier"],
+                        required=True
+                    )
+                },
+                hide_index=True
+            )
+
+            # 3. SAVE BUTTON LOGIC
+            col_act1, col_act2 = st.columns([1, 4])
+            with col_act1:
+                save_btn = st.button("💾 Simpan Perubahan ke Cloud", type="primary", use_container_width=True)
+            
+            if save_btn:
+                # Convert DataFrame kembali ke struktur Dictionary Menu
+                # Struktur: { "Kategori": [ {name, price, printer}, ... ] }
+                
+                new_menu_dict = {}
+                try:
+                    for index, row in edited_df.iterrows():
+                        cat = row['Kategori'].strip() if row['Kategori'] else "OTHERS"
+                        name = row['Nama Menu'].strip()
+                        price = float(row['Harga'])
+                        printer = row['Printer']
+                        
+                        # Validasi nama tidak boleh kosong
+                        if not name: continue
+                        
+                        if cat not in new_menu_dict:
+                            new_menu_dict[cat] = []
+                        
+                        new_menu_dict[cat].append({
+                            "name": name,
+                            "price": price,
+                            "printer": printer
+                        })
+                    
+                    # Upload ke Firestore
+                    with st.spinner("Menyimpan ke Cloud..."):
+                        success, msg = save_menu_config_to_cloud(selected_branch, new_menu_dict)
+                    
+                    if success:
+                        st.success(f"✅ {msg}")
+                        time.sleep(1.5)
+                        st.rerun() # Refresh agar data terupdate
+                    else:
+                        st.error(f"❌ {msg}")
+                        
+                except Exception as e:
+                    st.error(f"Terjadi kesalahan saat memproses data: {e}")
+                    st.write("Debug Error:", e)
