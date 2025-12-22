@@ -195,7 +195,6 @@ def process_data_for_display(history_data):
             if isinstance(items, dict): items = list(items.values())
             
             grand_total = float(order.get('total_final', order.get('total', 0)))
-            # Coba ambil field detail lain jika ada (untuk akurasi laporan)
             subtotal = float(order.get('subtotal', 0))
             if subtotal == 0 and grand_total > 0: subtotal = grand_total # Fallback
             
@@ -215,7 +214,7 @@ def process_data_for_display(history_data):
                     "Kode Unik": order.get('order_id', order.get('unique_code', 'N/A')),
                     "Tanggal": ot.date(),
                     "Waktu": ot.time(),
-                    "Jam": ot.hour, # Untuk analisa per jam
+                    "Jam": ot.hour, 
                     "Tipe Order": order.get('order_type', 'N/A'),
                     "Meja": order.get('table_number', 'N/A'),
                     "Subtotal": subtotal,
@@ -231,7 +230,10 @@ def process_data_for_display(history_data):
     return pd.DataFrame(processed)
 
 def process_data_for_analysis(history_data, menu_data):
-    """Memproses data level Item untuk analisa kategori dan produk terlaris."""
+    """
+    Memproses data level Item untuk analisa kategori dan produk terlaris.
+    UPDATE: Menambahkan 'Tipe Order' agar Sheet 4 bisa memisahkan Sales vs Free.
+    """
     cat_map = {}
     if isinstance(menu_data, dict):
         for c, items in menu_data.items():
@@ -251,6 +253,9 @@ def process_data_for_analysis(history_data, menu_data):
             ts = order.get('timestamp') or order.get('completed_time')
             ot = parse_flexible_date(ts)
             
+            # Ambil Tipe Order untuk pemisah (Paid vs Free/Complimentary)
+            order_type = order.get('order_type', 'N/A')
+            
             if ot:
                 if ot.tzinfo is not None: ot = ot.replace(tzinfo=None)
                 for i in items:
@@ -262,6 +267,7 @@ def process_data_for_analysis(history_data, menu_data):
                         "Tanggal": ot.date(),
                         "Nama Menu": nm,
                         "Kategori": cat_map.get(nm, 'Lain-lain'),
+                        "Tipe Order": order_type, # Ditambahkan untuk Sheet 4
                         "Qty": qty,
                         "Harga Satuan": price,
                         "Total": qty * price
@@ -272,13 +278,16 @@ def process_data_for_analysis(history_data, menu_data):
 # ==============================================================================
 # 4. EXCEL REPORT GENERATOR (ESB STYLE - ENTERPRISE GRADE)
 # ==============================================================================
-def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date): 
+def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, start_date, end_date): 
+    """
+    raw_data_filtered: List of dict (transaksi asli) yang sudah difilter tanggalnya.
+    Digunakan untuk membuat Transaction Log yang meledak (explode) per item.
+    """
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
         
         # --- DEFINISI FORMATTING (Styling) ---
-        # Header Utama
         fmt_title = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
         fmt_subtitle = workbook.add_format({'italic': True, 'font_size': 10, 'align': 'left', 'font_color': '#555555'})
         
@@ -289,26 +298,27 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
         })
         
         # Cells
-        fmt_text = workbook.add_format({'border': 1, 'align': 'left'})
-        fmt_center = workbook.add_format({'border': 1, 'align': 'center'})
-        fmt_num = workbook.add_format({'border': 1, 'align': 'center'})
-        fmt_curr = workbook.add_format({'border': 1, 'num_format': 'Rp #,##0', 'align': 'right'})
+        fmt_text = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'top'})
+        fmt_center = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'top'})
+        fmt_num = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'top'})
+        fmt_curr = workbook.add_format({'border': 1, 'num_format': 'Rp #,##0', 'align': 'right', 'valign': 'top'})
         
+        # Border tapi kosong (untuk item ke-2 dst di Log)
+        fmt_empty_border = workbook.add_format({'border': 1, 'bg_color': '#FFFFFF'})
+
         # Totals
         fmt_total_label = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#ECF0F1', 'align': 'right'})
         fmt_total_val = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#ECF0F1', 'num_format': 'Rp #,##0', 'align': 'right'})
 
-        # --- SHEET 1: SALES SUMMARY (RINGKASAN EKSEKUTIF) ---
+        # --- SHEET 1: SALES SUMMARY ---
         ws = workbook.add_worksheet('Sales Summary')
         ws.set_column('A:A', 30)
         ws.set_column('B:B', 20)
         
-        # Judul Laporan
         ws.write('A1', f"SALES SUMMARY REPORT - {branch_name}", fmt_title)
         ws.write('A2', f"Periode: {start_date} s/d {end_date}", fmt_subtitle)
         
         if not df_trx.empty:
-            # Hitung Metrics
             total_bill = len(df_trx)
             gross_sales = df_trx['Subtotal'].sum()
             total_disc = df_trx['Diskon'].sum()
@@ -317,7 +327,6 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
             net_sales = df_trx['Grand Total'].sum()
             avg_bill = net_sales / total_bill if total_bill > 0 else 0
 
-            # Tabel Ringkasan Keuangan
             row = 4
             ws.write(row, 0, "METRICS", fmt_th)
             ws.write(row, 1, "AMOUNT", fmt_th)
@@ -336,7 +345,6 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
                 ws.write(row, 1, v, fmt_curr)
                 row += 1
                 
-            # Statistik Tambahan
             row += 1
             ws.write(row, 0, "Total Transactions", fmt_text)
             ws.write(row, 1, total_bill, fmt_center)
@@ -344,7 +352,7 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
             ws.write(row, 0, "Average per Bill", fmt_text)
             ws.write(row, 1, avg_bill, fmt_curr)
 
-        # --- SHEET 2: PAYMENT REPORT (PEMBAYARAN) ---
+        # --- SHEET 2: PAYMENT REPORT ---
         ws_pay = workbook.add_worksheet('Payment Report')
         ws_pay.set_column('A:A', 25)
         ws_pay.set_column('B:B', 20)
@@ -365,12 +373,11 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
                 ws_pay.write(r, 2, row_data['Kode Unik'], fmt_center)
                 r += 1
             
-            # Total Bawah
             ws_pay.write(r, 0, "TOTAL", fmt_total_label)
             ws_pay.write(r, 1, pay_sum['Grand Total'].sum(), fmt_total_val)
             ws_pay.write(r, 2, pay_sum['Kode Unik'].sum(), fmt_total_val)
 
-        # --- SHEET 3: CATEGORY SALES (KATEGORI) ---
+        # --- SHEET 3: CATEGORY SALES ---
         if not df_items.empty:
             ws_cat = workbook.add_worksheet('Category Sales')
             ws_cat.set_column('A:A', 25)
@@ -396,21 +403,21 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
             ws_cat.write(r, 1, cat_sum['Total'].sum(), fmt_total_val)
             ws_cat.write(r, 2, cat_sum['Qty'].sum(), fmt_total_val)
 
-        # --- SHEET 4: ITEM SALES (DETAIL MENU) ---
+        # --- SHEET 4: ITEM SALES (DETAIL MENU) - UPDATED WITH ORDER TYPE ---
         if not df_items.empty:
             ws_item = workbook.add_worksheet('Item Sales')
             ws_item.set_column('A:A', 20) # Kategori
             ws_item.set_column('B:B', 30) # Nama Item
-            ws_item.set_column('C:C', 10) # Qty
-            ws_item.set_column('D:D', 15) # Harga Satuan
+            ws_item.set_column('C:C', 20) # Tipe Order (NEW)
+            ws_item.set_column('D:D', 10) # Qty
             ws_item.set_column('E:E', 20) # Total
             
             ws_item.write('A1', "PRODUCT MIX REPORT (ITEM SALES)", fmt_title)
             
-            # Group by Item agar tidak duplikat
-            item_sum = df_items.groupby(['Kategori', 'Nama Menu']).agg({'Qty': 'sum', 'Total': 'sum'}).reset_index().sort_values(['Kategori', 'Total'], ascending=[True, False])
+            # Group by [Kategori, Nama Menu, Tipe Order] untuk membedakan Sales Biasa vs Free
+            item_sum = df_items.groupby(['Kategori', 'Nama Menu', 'Tipe Order']).agg({'Qty': 'sum', 'Total': 'sum'}).reset_index().sort_values(['Kategori', 'Total'], ascending=[True, False])
             
-            headers = ["Category", "Item Name", "Qty Sold", "Total Sales"]
+            headers = ["Category", "Item Name", "Order Type", "Qty Sold", "Total Sales"]
             for col_num, h in enumerate(headers):
                 ws_item.write(2, col_num, h, fmt_th)
             
@@ -418,11 +425,15 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
             for idx, row_data in item_sum.iterrows():
                 ws_item.write(r, 0, row_data['Kategori'], fmt_text)
                 ws_item.write(r, 1, row_data['Nama Menu'], fmt_text)
-                ws_item.write(r, 2, row_data['Qty'], fmt_center)
-                ws_item.write(r, 3, row_data['Total'], fmt_curr)
+                ws_item.write(r, 2, row_data['Tipe Order'], fmt_center) # New Column
+                ws_item.write(r, 3, row_data['Qty'], fmt_center)
+                ws_item.write(r, 4, row_data['Total'], fmt_curr)
                 r += 1
+            
+            ws_item.write(r, 3, "TOTAL", fmt_total_label)
+            ws_item.write(r, 4, item_sum['Total'].sum(), fmt_total_val)
 
-        # --- SHEET 5: HOURLY SALES (JAM SIBUK) ---
+        # --- SHEET 5: HOURLY SALES ---
         if not df_trx.empty:
             ws_hour = workbook.add_worksheet('Hourly Sales')
             ws_hour.set_column('A:A', 15)
@@ -431,7 +442,6 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
             
             ws_hour.write('A1', "HOURLY SALES TREND", fmt_title)
             
-            # Group by Jam
             hour_sum = df_trx.groupby('Jam').agg({'Grand Total': 'sum', 'Kode Unik': 'count'}).reset_index().sort_values('Jam')
             
             ws_hour.write('A3', "Hour", fmt_th)
@@ -446,7 +456,6 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
                 ws_hour.write(r, 2, row_data['Kode Unik'], fmt_center)
                 r += 1
                 
-            # Chart Sederhana di Excel
             chart = workbook.add_chart({'type': 'column'})
             chart.add_series({
                 'name':       'Sales Amount',
@@ -455,39 +464,104 @@ def create_esb_style_excel(df_trx, df_items, branch_name, start_date, end_date):
                 'fill':       {'color': '#3498DB'}
             })
             chart.set_title ({'name': 'Hourly Sales Performance'})
-            chart.set_x_axis({'name': 'Hour'})
-            chart.set_y_axis({'name': 'Sales (Rp)'})
             ws_hour.insert_chart('E3', chart)
 
-        # --- SHEET 6: TRANSACTION LOG (RAW DATA) ---
-        if not df_trx.empty:
-            ws_log = workbook.add_worksheet('Transaction Log')
-            
-            # Kolom yang akan ditampilkan
-            columns = ['Kode Unik', 'Tanggal', 'Waktu', 'Meja', 'Kasir', 'Tipe Order', 'Metode Bayar', 'Grand Total', 'Detail Item']
-            
-            # Header
-            for i, col in enumerate(columns):
-                ws_log.write(0, i, col, fmt_th)
-                # Set lebar kolom manual biar rapi
-                width = 15
-                if col == 'Detail Item': width = 50
-                elif col == 'Kode Unik': width = 20
-                ws_log.set_column(i, i, width)
-
-            # Data
-            r = 1
-            for idx, row_data in df_trx.iterrows():
-                for c_idx, col_name in enumerate(columns):
-                    val = row_data[col_name]
-                    # Format khusus
-                    cell_fmt = fmt_text
-                    if col_name == 'Grand Total': cell_fmt = fmt_curr
-                    elif col_name in ['Tanggal', 'Waktu']: val = str(val); cell_fmt = fmt_center
-                    elif col_name in ['Meja', 'Kasir']: cell_fmt = fmt_center
-                    
-                    ws_log.write(r, c_idx, val, cell_fmt)
-                r += 1
+        # --- SHEET 6: TRANSACTION LOG (RAW DATA) - COMPLETELY REVAMPED ---
+        # Logic: 1 Row per Item. 
+        # Header Info (Kode Unik, Tanggal, dll) hanya muncul di baris item pertama.
+        
+        ws_log = workbook.add_worksheet('Transaction Log')
+        
+        # Headers
+        headers_log = [
+            'Kode Unik', 'Tanggal', 'Waktu', 'Tipe Order', 'Meja', 'Kasir', 
+            'Metode Bayar', 'Grand Total', # Header Transaksi
+            'Item Name', 'Qty', 'Item Price', 'Item Total' # Header Item
+        ]
+        
+        for i, h in enumerate(headers_log):
+            ws_log.write(0, i, h, fmt_th)
+        
+        # Atur lebar kolom
+        ws_log.set_column('A:A', 20) # Kode
+        ws_log.set_column('B:C', 12) # Tanggal Waktu
+        ws_log.set_column('D:D', 15) # Tipe
+        ws_log.set_column('G:G', 15) # Payment
+        ws_log.set_column('H:H', 15) # GT
+        ws_log.set_column('I:I', 35) # Nama Item
+        
+        curr_row = 1
+        
+        # Loop Raw Data (List of Dicts)
+        if raw_data_filtered:
+            for trx in raw_data_filtered:
+                # Ambil Info Header
+                trx_id = trx.get('order_id', trx.get('unique_code', 'N/A'))
+                
+                # Parsing Date
+                ts = trx.get('timestamp') or trx.get('completed_time')
+                ot = parse_flexible_date(ts)
+                tgl_str = ot.strftime("%Y-%m-%d") if ot else "-"
+                jam_str = ot.strftime("%H:%M:%S") if ot else "-"
+                
+                trx_type = trx.get('order_type', '-')
+                table = trx.get('table_number', '-')
+                cashier = trx.get('cashier', 'System')
+                
+                pay_method = trx.get('payment_method', '-')
+                if isinstance(pay_method, list): pay_method = ", ".join(pay_method)
+                
+                grand_total = float(trx.get('total_final', trx.get('total', 0)))
+                
+                # Ambil Item List
+                items = trx.get('items', [])
+                if isinstance(items, dict): items = list(items.values())
+                
+                # Loop Items
+                first_item_in_trx = True
+                
+                if not items:
+                    # Handle kasus aneh tanpa item tapi ada sales
+                    ws_log.write(curr_row, 0, trx_id, fmt_text)
+                    ws_log.write(curr_row, 1, tgl_str, fmt_center)
+                    ws_log.write(curr_row, 2, jam_str, fmt_center)
+                    ws_log.write(curr_row, 3, trx_type, fmt_center)
+                    ws_log.write(curr_row, 4, table, fmt_center)
+                    ws_log.write(curr_row, 5, cashier, fmt_center)
+                    ws_log.write(curr_row, 6, pay_method, fmt_text)
+                    ws_log.write(curr_row, 7, grand_total, fmt_curr)
+                    ws_log.write(curr_row, 8, "NO ITEMS", fmt_text)
+                    curr_row += 1
+                else:
+                    for item in items:
+                        # Tulis Kolom A - H (Header Info)
+                        if first_item_in_trx:
+                            ws_log.write(curr_row, 0, trx_id, fmt_text)
+                            ws_log.write(curr_row, 1, tgl_str, fmt_center)
+                            ws_log.write(curr_row, 2, jam_str, fmt_center)
+                            ws_log.write(curr_row, 3, trx_type, fmt_center)
+                            ws_log.write(curr_row, 4, table, fmt_center)
+                            ws_log.write(curr_row, 5, cashier, fmt_center)
+                            ws_log.write(curr_row, 6, pay_method, fmt_text)
+                            ws_log.write(curr_row, 7, grand_total, fmt_curr)
+                            first_item_in_trx = False
+                        else:
+                            # Tulis Border Kosong untuk baris ke-2 dst
+                            for c in range(8):
+                                ws_log.write(curr_row, c, "", fmt_empty_border)
+                        
+                        # Tulis Kolom I - L (Item Info)
+                        i_name = item.get('name', 'Unknown')
+                        i_qty = float(item.get('quantity', item.get('qty', 1)))
+                        i_price = float(item.get('price', 0))
+                        i_total = i_qty * i_price
+                        
+                        ws_log.write(curr_row, 8, i_name, fmt_text)
+                        ws_log.write(curr_row, 9, i_qty, fmt_center)
+                        ws_log.write(curr_row, 10, i_price, fmt_curr)
+                        ws_log.write(curr_row, 11, i_total, fmt_curr)
+                        
+                        curr_row += 1
 
     return output
 
@@ -537,24 +611,41 @@ else:
             d1 = c1.date_input("Dari Tanggal", min_date)
             d2 = c2.date_input("Sampai Tanggal", max_date)
             
+            # --- FILTER LOGIC ---
+            # Kita filter df_display dan df_analysis untuk visualisasi
+            # Dan kita juga filter history_data (Raw) untuk keperluan Export Excel yang akurat
+            
+            df_filtered = pd.DataFrame()
+            df_filtered_analysis = pd.DataFrame()
+            raw_data_filtered = [] # Untuk Transaction Log Excel
+
             if not df_display.empty:
+                # Filter DataFrame Display
                 mask_display = (df_display['Tanggal'] >= d1) & (df_display['Tanggal'] <= d2)
                 df_filtered = df_display[mask_display]
                 
+                # Filter DataFrame Analysis
                 if not df_analysis.empty:
                     mask_analysis = (df_analysis['Tanggal'] >= d1) & (df_analysis['Tanggal'] <= d2)
                     df_filtered_analysis = df_analysis[mask_analysis]
-                else:
-                    df_filtered_analysis = pd.DataFrame()
+                
+                # Filter Raw List of Dicts (Manual Filter)
+                for trx in history_data:
+                    ts = trx.get('timestamp') or trx.get('completed_time')
+                    ot = parse_flexible_date(ts)
+                    if ot:
+                        trx_date = ot.date()
+                        if d1 <= trx_date <= d2:
+                            raw_data_filtered.append(trx)
                 
                 # KPI Cards
                 tot = df_filtered['Grand Total'].sum()
-                trx = len(df_filtered)
-                avg_basket = tot / trx if trx > 0 else 0
+                trx_count = len(df_filtered)
+                avg_basket = tot / trx_count if trx_count > 0 else 0
                 
                 k1, k2, k3 = st.columns(3)
                 k1.metric("Total Omset", f"Rp {tot:,.0f}")
-                k2.metric("Total Transaksi", f"{trx} Bon")
+                k2.metric("Total Transaksi", f"{trx_count} Bon")
                 k3.metric("Rata-rata per Bon", f"Rp {avg_basket:,.0f}")
                 
                 st.divider()
@@ -593,7 +684,7 @@ else:
             else:
                 st.info("Belum ada data transaksi di sistem.")
 
-        # --- TAB 2: DETAIL & EXPORT (THE BIG UPDATE) ---
+        # --- TAB 2: DETAIL & EXPORT (UPDATED) ---
         with tab2:
             st.subheader("📄 Laporan Detail & Export")
             if df_display.empty: 
@@ -604,45 +695,36 @@ else:
                 
                 st.divider()
                 st.write("### 📥 Download Laporan Lengkap")
-                st.info("Laporan Excel ini berisi: Sales Summary, Payment Report, Category Sales, Item Sales, Hourly Trend, dan Transaction Log.")
+                st.info("Laporan Excel ini berisi: Sales Summary, Payment Report, Category Sales, Item Sales (Order Type Split), Hourly Trend, dan Transaction Log (Waterfall Detail).")
                 
-                col_btn, col_dummy = st.columns([1, 2])
-                with col_btn:
-                    # Filter data lagi untuk export (gunakan filter tanggal dari Tab 1 atau ambil semua?) 
-                    # Idealnya ambil sesuai filter yang aktif di Tab 1, mari kita gunakan logika filter yang sama
-                    # Agar konsisten, kita ambil df_filtered dan df_filtered_analysis yang sudah difilter di atas
-                    # Note: df_filtered didefinisikan di Tab 1 local scope.
-                    # Kita re-apply filter di sini untuk amannya.
-                    
-                    min_d = df_display['Tanggal'].min()
-                    max_d = df_display['Tanggal'].max()
-                    
-                    # Kita pakai date picker di Tab 1 saja biar global, tapi karena scope streamit
-                    # Kita anggap user sudah filter di Tab 1. Tapi karena variable ada di scope 'with tab1', kita harus bikin global.
-                    # Solusi cepat: Re-create filter dates di sidebar atau biarkan user download ALL DATA or use Session State.
-                    # Untuk kesederhanaan skrip "Full", kita export SESUAI TAMPILAN (df_filtered kalau ada, kalau tidak semua).
-                    
-                    # Logic: Jika variable 'df_filtered' exists (user buka tab 1), pakai itu. Jika tidak, pakai semua.
-                    try:
-                        data_to_export_trx = df_filtered
-                        data_to_export_items = df_filtered_analysis
-                        export_label = f"Laporan_{selected_branch}_{d1}_{d2}.xlsx"
-                        st.success(f"Siap download untuk periode: {d1} s/d {d2}")
-                    except:
-                        data_to_export_trx = df_display
-                        data_to_export_items = df_analysis
-                        export_label = f"Laporan_{selected_branch}_ALL.xlsx"
-                        st.warning("Men-download SEMUA data (Filter tanggal ada di Tab 1).")
+                if st.button("Download Excel (ESB Style)"):
+                    if not df_filtered.empty:
+                        # Gunakan data yang sudah difilter di Tab 1
+                        export_trx = df_filtered
+                        export_items = df_filtered_analysis
+                        export_raw = raw_data_filtered
+                        f_start = str(d1)
+                        f_end = str(d2)
+                    else:
+                        # Fallback jika user belum pilih tanggal (pakai semua)
+                        export_trx = df_display
+                        export_items = df_analysis
+                        export_raw = history_data
+                        f_start = "ALL"
+                        f_end = "ALL"
 
-                    if st.button("Download Excel (ESB Style)"):
-                        with st.spinner("Generating Report..."):
-                            excel_file = create_esb_style_excel(data_to_export_trx, data_to_export_items, selected_branch, str(min_d), str(max_d))
-                            st.download_button(
-                                label="📥 Klik Disini Untuk Simpan File",
-                                data=excel_file.getvalue(),
-                                file_name=export_label,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
+                    filename = f"Laporan_{selected_branch}_{f_start}_sd_{f_end}.xlsx"
+                    
+                    with st.spinner("Generating Report..."):
+                        # Panggil fungsi Excel yang baru dengan parameter raw_data_filtered
+                        excel_file = create_esb_style_excel(export_trx, export_items, export_raw, selected_branch, f_start, f_end)
+                        
+                        st.download_button(
+                            label="📥 Klik Disini Untuk Simpan File",
+                            data=excel_file.getvalue(),
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 
         # --- TAB 3: LIHAT MENU ---
         with tab_menu_view:
