@@ -56,7 +56,7 @@ def initialize_firebase():
             # Jika belum ada, buat user default
             default_admin = {
                 "pin": "123",
-                "role": "owner",
+                "role": "administrator",
                 "access_branches": ["ALL"], # Bisa akses semua
                 "created_at": firestore.SERVER_TIMESTAMP
             }
@@ -572,9 +572,9 @@ else:
         user_role = st.session_state.get('user_role', 'staff')
         
         tab_list = ["📈 Ringkasan & KPI", "📄 Data Detail (Export)", "🍔 Lihat Menu (View)"]
-        if user_role in ['owner', 'manager']:
+        if user_role in ['administrator', 'manager']:
             tab_list.append("📝 Editor Menu (Admin)")
-        if user_role == 'owner':
+        if user_role == 'administrator':
             tab_list.append("👥 Manajemen User")
         
         tabs = st.tabs(tab_list)
@@ -729,7 +729,7 @@ else:
                 st.info("Data menu belum tersedia.")
 
         # --- TAB 4: EDITOR MENU (Conditional for Owner/Manager) ---
-        if user_role in ['owner', 'manager'] and "📝 Editor Menu (Admin)" in tab_list:
+        if user_role in ['administrator', 'manager'] and "📝 Editor Menu (Admin)" in tab_list:
             # Cari index dari list
             idx_edit = tab_list.index("📝 Editor Menu (Admin)")
             with tabs[idx_edit]:
@@ -792,7 +792,7 @@ else:
                         st.error(f"Error: {e}")
 
         # --- TAB 5: USER MANAGEMENT (Owner Only) ---
-        if user_role == 'owner' and "👥 Manajemen User" in tab_list:
+        if user_role == 'administrator' and "👥 Manajemen User" in tab_list:
             idx_user = tab_list.index("👥 Manajemen User")
             with tabs[idx_user]:
                 st.subheader("Manajemen Hak Akses User")
@@ -803,7 +803,7 @@ else:
                     with st.form("add_user_form"):
                         new_u = st.text_input("Username Baru (tanpa spasi)")
                         new_p = st.text_input("PIN (Password)")
-                        new_r = st.selectbox("Role", ["owner", "manager", "staff"])
+                        new_r = st.selectbox("Role", ["administrator", "manager", "staff"])
                         opts = ["ALL"] + ALL_BRANCHES_MASTER
                         new_b = st.multiselect("Akses Cabang", opts, default=["Testing"])
                         
@@ -839,3 +839,4 @@ else:
                                 st.error("Gagal menghapus.")
                     else:
                         st.info("Belum ada user lain.")
+
