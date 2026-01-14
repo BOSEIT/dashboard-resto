@@ -355,17 +355,17 @@ def process_data_for_analysis(history_data, menu_data):
     return pd.DataFrame(analysis)
 
 # ==============================================================================
-# 5. EXCEL REPORT GENERATOR (FULL 6 SHEETS RESTORED)
+# 5. EXCEL REPORT GENERATOR (FULL 8 SHEETS MERGED)
 # ==============================================================================
 def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, start_date, end_date): 
     """
-    Export Lengkap dengan 6 Sheet (Summary, Payment, Category, Item, Hourly, Transaction Log).
+    Export Lengkap dengan 8 Sheet (6 Standard + Promo + Cancel).
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
         
-        # --- STYLING ---
+        # --- STYLING STANDARD ---
         fmt_title = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
         fmt_subtitle = workbook.add_format({'italic': True, 'font_size': 10, 'align': 'left', 'font_color': '#555555'})
         fmt_th = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#2C3E50', 'font_color': '#FFFFFF', 'border': 1})
@@ -376,7 +376,15 @@ def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, sta
         fmt_total_label = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#ECF0F1', 'align': 'right'})
         fmt_total_val = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#ECF0F1', 'num_format': 'Rp #,##0', 'align': 'right'})
 
-        # --- SHEET 1: SALES SUMMARY ---
+        # --- STYLING FOR PROMO & CANCEL SHEETS (New) ---
+        fmt_header_doc = workbook.add_format({'bold': True, 'font_size': 12})
+        fmt_table_header_gray = workbook.add_format({'bold': True, 'bg_color': '#CCCCCC', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
+        fmt_date_val = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'top', 'num_format': 'yyyy-mm-dd'})
+        fmt_number = workbook.add_format({'border': 1, 'num_format': '#,##0.00', 'align': 'right', 'valign': 'top'})
+
+        # ======================================================================
+        # SHEET 1: SALES SUMMARY
+        # ======================================================================
         ws = workbook.add_worksheet('Sales Summary')
         ws.set_column('A:A', 30); ws.set_column('B:B', 20)
         
@@ -408,7 +416,9 @@ def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, sta
             ws.write(row, 0, "Total Transactions", fmt_text); ws.write(row, 1, total_bill, fmt_center); row += 1
             ws.write(row, 0, "Average per Bill", fmt_text); ws.write(row, 1, avg_bill, fmt_curr)
 
-        # --- SHEET 2: PAYMENT REPORT ---
+        # ======================================================================
+        # SHEET 2: PAYMENT REPORT
+        # ======================================================================
         ws_pay = workbook.add_worksheet('Payment Report')
         ws_pay.set_column('A:A', 25); ws_pay.set_column('B:B', 20); ws_pay.set_column('C:C', 15)
         ws_pay.write('A1', "PAYMENT METHOD REPORT", fmt_title)
@@ -426,7 +436,9 @@ def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, sta
             ws_pay.write(r, 1, pay_sum['Grand Total'].sum(), fmt_total_val)
             ws_pay.write(r, 2, pay_sum['Kode Unik'].sum(), fmt_total_val)
 
-        # --- SHEET 3: CATEGORY SALES ---
+        # ======================================================================
+        # SHEET 3: CATEGORY SALES
+        # ======================================================================
         if not df_items.empty:
             ws_cat = workbook.add_worksheet('Category Sales')
             ws_cat.set_column('A:A', 25); ws_cat.set_column('B:B', 20); ws_cat.set_column('C:C', 15)
@@ -443,7 +455,9 @@ def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, sta
             ws_cat.write(r, 1, cat_sum['Total'].sum(), fmt_total_val)
             ws_cat.write(r, 2, cat_sum['Qty'].sum(), fmt_total_val)
 
-        # --- SHEET 4: ITEM SALES (DETAIL) ---
+        # ======================================================================
+        # SHEET 4: ITEM SALES (DETAIL)
+        # ======================================================================
         if not df_items.empty:
             ws_item = workbook.add_worksheet('Item Sales')
             ws_item.set_column('A:A', 20); ws_item.set_column('B:B', 30); ws_item.set_column('C:C', 20); ws_item.set_column('D:D', 10); ws_item.set_column('E:E', 20)
@@ -461,7 +475,9 @@ def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, sta
                 r += 1
             ws_item.write(r, 3, "TOTAL", fmt_total_label); ws_item.write(r, 4, item_sum['Total'].sum(), fmt_total_val)
 
-        # --- SHEET 5: HOURLY SALES ---
+        # ======================================================================
+        # SHEET 5: HOURLY SALES
+        # ======================================================================
         if not df_trx.empty:
             ws_hour = workbook.add_worksheet('Hourly Sales')
             ws_hour.set_column('A:A', 15); ws_hour.set_column('B:B', 20); ws_hour.set_column('C:C', 15)
@@ -479,7 +495,9 @@ def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, sta
             chart.add_series({'name': 'Sales Amount', 'categories': ['Hourly Sales', 3, 0, r-1, 0], 'values': ['Hourly Sales', 3, 1, r-1, 1], 'fill': {'color': '#3498DB'}})
             ws_hour.insert_chart('E3', chart)
 
-        # --- SHEET 6: TRANSACTION LOG (RAW DATA) ---
+        # ======================================================================
+        # SHEET 6: TRANSACTION LOG (RAW DATA)
+        # ======================================================================
         ws_log = workbook.add_worksheet('Transaction Log')
         headers_log = ['Kode Unik', 'Tanggal', 'Waktu', 'Tipe Order', 'Meja', 'Kasir', 'Metode Bayar', 'Grand Total', 'Item Name', 'Qty', 'Item Price', 'Item Total']
         for i, h in enumerate(headers_log): ws_log.write(0, i, h, fmt_th)
@@ -528,31 +546,13 @@ def create_esb_style_excel(df_trx, df_items, raw_data_filtered, branch_name, sta
                         ws_log.write(curr_row, 8, i_name, fmt_text); ws_log.write(curr_row, 9, i_qty, fmt_center)
                         ws_log.write(curr_row, 10, i_price, fmt_curr); ws_log.write(curr_row, 11, i_total, fmt_curr)
                         curr_row += 1
-    return output
 
-def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
-    """
-    Generate Excel untuk Laporan Promo dan Laporan Cancel/Void.
-    """
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        workbook = writer.book
-        
-        # --- Common Formats ---
-        fmt_header_doc = workbook.add_format({'bold': True, 'font_size': 12})
-        fmt_table_header = workbook.add_format({'bold': True, 'bg_color': '#CCCCCC', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
-        fmt_text = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'top'})
-        fmt_center = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'top'})
-        fmt_date_val = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'top', 'num_format': 'yyyy-mm-dd'})
-        fmt_number = workbook.add_format({'border': 1, 'num_format': '#,##0.00', 'align': 'right', 'valign': 'top'})
-        fmt_title = workbook.add_format({'bold': True, 'font_size': 14})
-        
         # ======================================================================
-        # SHEET 1: PROMOTION REPORT
+        # SHEET 7: PROMOTION REPORT (NEW)
         # ======================================================================
         ws_promo = workbook.add_worksheet('Promotion Report')
         
-        # --- HEADER SECTION ---
+        # Header
         ws_promo.write('A1', "Promotion Report", fmt_title)
         ws_promo.write('A2', "PT Hoki Berkat Jaya", fmt_header_doc)
         ws_promo.write('A4', f"Generated: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
@@ -561,7 +561,6 @@ def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
         ws_promo.write('A7', "Promotion Filter: Detail Bill")
         ws_promo.write('A8', "Company: PT Hoki Berkat Jaya")
         
-        # --- TABLE HEADERS ---
         headers_promo = [
             "Branch", "Sales Date", "Promotion Type", "Promotion Name", "Sales Number",
             "Original Price", "Special Price", "Member Code", "Member Name",
@@ -572,36 +571,27 @@ def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
         ]
         
         for col, h in enumerate(headers_promo):
-            ws_promo.write(9, col, h, fmt_table_header)
+            ws_promo.write(9, col, h, fmt_table_header_gray)
         
-        # Set Widths
         ws_promo.set_column('A:A', 25); ws_promo.set_column('B:B', 12); ws_promo.set_column('C:E', 20)
         ws_promo.set_column('H:I', 15); ws_promo.set_column('V:X', 15)
         
-        # --- DATA ROWS ---
         row_idx = 10
-        if raw_data:
-            for trx in raw_data:
-                # Basic Trx Info
+        if raw_data_filtered:
+            for trx in raw_data_filtered:
                 ts = trx.get('timestamp') or trx.get('completed_time')
                 ot = parse_flexible_date(ts)
                 sales_date = ot.date() if ot else None
                 sales_no = trx.get('order_id', trx.get('unique_code', '-'))
-                
-                # Financials
                 subtotal = float(trx.get('subtotal', 0))
                 bill_total = float(trx.get('total_final', 0))
                 disc_amt = float(trx.get('discount_amount', 0))
-                voucher_amt = float(trx.get('voucher_amount', 0))
                 
-                # Member & Employee Info
                 member = trx.get('member', {}) if isinstance(trx.get('member'), dict) else {}
                 mem_code = member.get('code', 'Non Member')
                 mem_name = member.get('name', 'Non Member')
-                
                 cashier_name = trx.get('cashier', '-')
                 
-                # --- LOGIC: BILL LEVEL DISCOUNT ---
                 if disc_amt > 0:
                     promo_name = trx.get('discount_name', 'General Discount')
                     promo_type = "DISCOUNT (%)" if ("%" in promo_name or "percent" in promo_name.lower()) else "DISCOUNT (AMT)"
@@ -615,8 +605,6 @@ def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
                     ws_promo.write(row_idx, 6, subtotal - disc_amt, fmt_number)
                     ws_promo.write(row_idx, 7, mem_code, fmt_text)
                     ws_promo.write(row_idx, 8, mem_name, fmt_text)
-                    
-                    # External Member/Employee Placeholders
                     ws_promo.write(row_idx, 9, "Non Member", fmt_text)
                     ws_promo.write(row_idx, 10, "Non Member", fmt_text)
                     ws_promo.write(row_idx, 11, "-", fmt_text)
@@ -624,30 +612,21 @@ def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
                     ws_promo.write(row_idx, 13, cashier_name, fmt_text)
                     ws_promo.write(row_idx, 14, "-", fmt_text)
                     ws_promo.write(row_idx, 15, "-", fmt_text)
-                    
-                    # Menu Info (Empty for Bill Disc)
                     ws_promo.write(row_idx, 16, "-", fmt_text)
                     ws_promo.write(row_idx, 17, "-", fmt_text)
                     ws_promo.write(row_idx, 18, "-", fmt_text)
                     ws_promo.write(row_idx, 19, "-", fmt_text)
-                    
-                    ws_promo.write(row_idx, 20, 1.0, fmt_number) # Qty 1 for Bill Disc
+                    ws_promo.write(row_idx, 20, 1.0, fmt_number)
                     ws_promo.write(row_idx, 21, disc_amt, fmt_number)
                     ws_promo.write(row_idx, 22, 0.0, fmt_number)
                     ws_promo.write(row_idx, 23, bill_total, fmt_number)
                     row_idx += 1
-                
-                # --- LOGIC: VOUCHER ---
-                if voucher_amt > 0:
-                     # Similar logic for voucher row if needed
-                     pass
 
         # ======================================================================
-        # SHEET 2: CANCEL MENU DETAIL REPORT
+        # SHEET 8: CANCEL MENU DETAIL REPORT (NEW)
         # ======================================================================
         ws_cancel = workbook.add_worksheet('Cancel Menu Detail Report')
         
-        # --- HEADER SECTION ---
         ws_cancel.write('A1', "Cancel Menu Detail Report", fmt_title)
         ws_cancel.write('A2', "PT Hoki Berkat Jaya", fmt_header_doc)
         ws_cancel.write('A4', f"Generated: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
@@ -656,7 +635,6 @@ def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
         ws_cancel.write('A7', "Type: Cancel / Void (Default)")
         ws_cancel.write('A8', "Status: all")
         
-        # --- TABLE HEADERS ---
         headers_cancel = [
             "Sales Number", "Branch", "Menu", "Menu Code", "Menu Category", 
             "Menu Category Detail", "Order By", "Order Time", "Cancel / Void By",
@@ -665,62 +643,43 @@ def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
         ]
         
         for col, h in enumerate(headers_cancel):
-            ws_cancel.write(9, col, h, fmt_table_header)
+            ws_cancel.write(9, col, h, fmt_table_header_gray)
             
         ws_cancel.set_column('A:B', 20); ws_cancel.set_column('C:C', 25); ws_cancel.set_column('H:J', 18)
         
-        # --- DATA ROWS ---
         row_c = 10
-        if raw_data:
-            for trx in raw_data:
-                # Identify Voids: Check for 'void_items' key or item status
+        if raw_data_filtered:
+            for trx in raw_data_filtered:
                 voids_found = []
-                
-                # Method 1: void_items list in trx
                 if 'void_items' in trx and isinstance(trx['void_items'], list):
                     voids_found.extend(trx['void_items'])
-                
-                # Method 2: items with status 'void'
                 if 'items' in trx and isinstance(trx['items'], list):
                     for itm in trx['items']:
                         if isinstance(itm, dict) and (itm.get('status') == 'void' or itm.get('void_qty', 0) > 0):
                             voids_found.append(itm)
-                
-                # Method 3: Whole transaction void
                 if trx.get('status') == 'void' or trx.get('order_status') == 'void':
-                    # Treat all items as void
                     if 'items' in trx:
                         voids_found.extend(trx['items'])
 
-                # Process found voids
                 if voids_found:
                     sales_no = trx.get('order_id', trx.get('unique_code', '-'))
                     ts = trx.get('timestamp') or trx.get('completed_time')
                     order_time = parse_flexible_date(ts)
                     order_time_str = order_time.strftime("%Y-%m-%d %H:%M:%S") if order_time else "-"
-                    
                     order_by = trx.get('cashier', 'System')
                     
                     for v_item in voids_found:
-                        # Extract details
                         m_name = v_item.get('name', 'Unknown')
                         m_code = v_item.get('code', '')
-                        m_cat = v_item.get('category', 'Food') # Default or extract
-                        
-                        # Void Details
+                        m_cat = v_item.get('category', 'Food')
                         v_by = v_item.get('void_by', trx.get('void_by', order_by))
-                        v_time = v_item.get('void_time', order_time_str) # Fallback to order time if no specific void time
+                        v_time = v_item.get('void_time', order_time_str)
                         v_notes = v_item.get('void_reason', trx.get('void_reason', 'Cancelled'))
-                        
                         qty = float(v_item.get('quantity', v_item.get('qty', 1)))
                         price = float(v_item.get('price', 0))
                         subtotal = qty * price
-                        
-                        # Tax/Service Calc (Estimate if not in item)
-                        svc_rate = 0.05 # Assumption or fetch from config
-                        tax_rate = 0.10
-                        svc = subtotal * svc_rate
-                        tax = (subtotal + svc) * tax_rate
+                        svc = subtotal * 0.05
+                        tax = (subtotal + svc) * 0.10
                         total = subtotal + svc + tax
 
                         ws_cancel.write(row_c, 0, sales_no, fmt_text)
@@ -728,7 +687,7 @@ def create_promo_cancel_excel(branch_name, start_date, end_date, raw_data):
                         ws_cancel.write(row_c, 2, m_name, fmt_text)
                         ws_cancel.write(row_c, 3, m_code, fmt_text)
                         ws_cancel.write(row_c, 4, m_cat, fmt_text)
-                        ws_cancel.write(row_c, 5, m_cat, fmt_text) # Detail same as cat
+                        ws_cancel.write(row_c, 5, m_cat, fmt_text)
                         ws_cancel.write(row_c, 6, order_by, fmt_center)
                         ws_cancel.write(row_c, 7, order_time_str, fmt_center)
                         ws_cancel.write(row_c, 8, v_by, fmt_center)
@@ -887,48 +846,32 @@ else:
                 st.dataframe(df_display, use_container_width=True)
                 
                 st.divider()
-                st.write("### 📥 Download Laporan")
+                st.write("### 📥 Download Laporan Lengkap")
+                st.info("Laporan Excel ini berisi: Sales Summary, Payment, Category, Item, Hourly, Transaction Log, **Promotion Report**, dan **Cancel Menu Detail Report**.")
                 
-                # Prepare data for export
-                if not df_filtered.empty:
-                    export_trx = df_filtered
-                    export_items = df_filtered_analysis
-                    export_raw = raw_data_filtered
-                    f_start = str(d1); f_end = str(d2)
-                else:
-                    export_trx = df_display
-                    export_items = df_analysis
-                    export_raw = history_data
-                    f_start = "ALL"; f_end = "ALL"
-                
-                col_d1, col_d2 = st.columns(2)
-                
-                with col_d1:
-                    st.info("📊 **Laporan Standard (ESB Style)**\n\nSales Summary, Payment, Category, Item, Hourly, Transaction Log.")
-                    if st.button("Download Excel (Standard)", key="btn_dl_std"):
-                        filename = f"Laporan_Standard_{selected_branch}_{f_start}_sd_{f_end}.xlsx"
-                        with st.spinner("Generating Standard Report..."):
-                            excel_file = create_esb_style_excel(export_trx, export_items, export_raw, selected_branch, f_start, f_end)
-                            st.download_button(
-                                label="📥 Download Standard Report",
-                                data=excel_file.getvalue(),
-                                file_name=filename,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                            
-                with col_d2:
-                    st.success("🏷️ **Laporan Promo & Cancel**\n\nPromotion Report (Detail Bill) & Cancel Menu Detail Report.")
-                    if st.button("Download Excel (Promo & Cancel)", key="btn_dl_promo"):
-                        filename_p = f"Laporan_PromoCancel_{selected_branch}_{f_start}_sd_{f_end}.xlsx"
-                        with st.spinner("Generating Promo & Cancel Report..."):
-                            # Using raw_data_filtered ensures we respect the date range selected
-                            excel_promo = create_promo_cancel_excel(selected_branch, f_start, f_end, export_raw)
-                            st.download_button(
-                                label="📥 Download Promo & Cancel Report",
-                                data=excel_promo.getvalue(),
-                                file_name=filename_p,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
+                if st.button("Download Excel (All-in-One)"):
+                    if not df_filtered.empty:
+                        export_trx = df_filtered
+                        export_items = df_filtered_analysis
+                        export_raw = raw_data_filtered
+                        f_start = str(d1); f_end = str(d2)
+                    else:
+                        export_trx = df_display
+                        export_items = df_analysis
+                        export_raw = history_data
+                        f_start = "ALL"; f_end = "ALL"
+
+                    filename = f"Laporan_Lengkap_{selected_branch}_{f_start}_sd_{f_end}.xlsx"
+                    
+                    with st.spinner("Generating Report..."):
+                        excel_file = create_esb_style_excel(export_trx, export_items, export_raw, selected_branch, f_start, f_end)
+                        
+                        st.download_button(
+                            label="📥 Klik Disini Untuk Simpan File",
+                            data=excel_file.getvalue(),
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 
         # --- TAB 3: LIHAT MENU ---
         with tabs[2]:
